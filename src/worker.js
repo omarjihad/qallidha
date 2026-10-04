@@ -154,6 +154,14 @@ async function api(request, env, ctx, url) {
     return json({ user: { uid: user.uid, name: user.name, photo: user.photo, guest: user.guest, startParam: user.startParam }, stats });
   }
 
+  {
+    const m = /^\/api\/rooms\/(\d{5})$/.exec(path);
+    if (m && request.method === 'GET') {
+      const info = await roomOf(env, m[1]).info();
+      return json(info);
+    }
+  }
+
   if (path === '/api/rooms' && request.method === 'POST') {
     const body = await readAuth(request);
     await identify(env, body);

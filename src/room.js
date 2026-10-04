@@ -21,6 +21,7 @@ import { Tg } from './telegram.js';
 const ERRORS = {
   started: 'اللعبة بدأت بهاي الغرفة — انتظر تخلص أو سوّي غرفة جديدة',
   full: `الغرفة مليانة (${MAX_PLAYERS} لاعبين)`,
+  notfound: 'ماكو غرفة بهالكود 🤷 تأكد من الرقم',
 };
 
 const rnd = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
@@ -107,7 +108,7 @@ export class Room extends DurableObject {
 
   async info() {
     if (!this.st) return { exists: false };
-    return { exists: true, phase: this.st.phase, players: this.st.order.length };
+    return { exists: true, phase: this.st.phase, players: this.st.order.length, max: MAX_PLAYERS };
   }
 
   /* ============================================================ الاتصال */
@@ -124,18 +125,15 @@ export class Room extends DurableObject {
       /* تجاهل */
     }
     if (!user || !user.uid) return new Response('unauthorized', { status: 401 });
-    if (!this.st) {
-      this.ensureTables();
-      this.st = this.fresh(url.searchParams.get('code'));
-    }
 
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
     this.ctx.acceptWebSocket(server, [user.uid]);
-    server.serializeAttachment({ uid: user.uid });
+    server.serializeAttachment({ uid: user.uid, replaced: !this.st });
 
-    const err = this.join(user);
+    // الغرفة لازم تكون منحجزة (من «العب ويا ربعك» أو /play) — الكود الغلط ما يسوّي غرفة
+    const err = this.st ? this.join(user) : 'notfound';
     if (err) {
       server.send(JSON.stringify({ t: 'error', code: err, m: ERRORS[err] || err }));
       server.close(4001, err);
@@ -444,7 +442,17 @@ export class Room extends DurableObject {
     } catch (e) {
       console.log('pickSounds failed', e && e.message);
     }
-    if (!sounds.length) return;
+    if (!sounds.length) {
+      const out = JSON.stringify({ t: 'error', code: 'nosounds', m: 'ماكو ولا صوت شغّال 😕 الأدمن يفعّل أصوات من البوت بأمر /sounds' });
+      for (const ws of this.ctx.getWebSockets(st.host)) {
+        try {
+          ws.send(out);
+        } catch {
+          /* */
+        }
+      }
+      return;
+    }
     st.sounds = sounds;
     st.rounds = Math.min(ROUNDS, sounds.length);
     st.gameNo += 1;

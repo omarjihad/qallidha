@@ -23,6 +23,7 @@ export class Hub extends DurableObject {
         plays INTEGER DEFAULT 0, active INTEGER DEFAULT 1)`,
     );
     this.sql.exec('CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS builtin_off (id TEXT PRIMARY KEY)');
   }
 
   /* ---------------- kv */
@@ -93,7 +94,66 @@ export class Hub extends DurableObject {
     return this.sql.exec('SELECT id, title, kind, img_file_id, active, plays FROM sounds ORDER BY id').toArray();
   }
   delSound(id) {
-    return this.sql.exec('UPDATE sounds SET active = 0 WHERE id = ? AND active = 1', id).rowsWritten > 0;
+    return this.sql.exec('DELETE FROM sounds WHERE id = ?', id).rowsWritten > 0;
+  }
+
+  builtinOff() {
+    return new Set(this.sql.exec('SELECT id FROM builtin_off').toArray().map((r) => r.id));
+  }
+
+  /** كل الأصوات (النظام + المضافة) مع حالتها — لقائمة الأدمن بالبوت. */
+  listAll() {
+    const off = this.builtinOff();
+    const builtin = BUILTIN_SOUNDS.map((b) => ({ key: b.id, title: b.title, emoji: b.emoji, kind: 'builtin', active: !off.has(b.id) }));
+    const custom = this.sql
+      .exec('SELECT id, title, kind, img_file_id, active FROM sounds ORDER BY id')
+      .toArray()
+      .map((c) => ({ key: 'c:' + c.id, title: c.title, emoji: c.kind === 'video' ? '🎬' : c.img_file_id ? '🖼️' : '🎙️', kind: 'custom', active: !!c.active }));
+    return [...custom, ...builtin];
+  }
+
+  /** تفعيل/تعطيل صوت. يرجع {title, active} أو null. */
+  toggleSound(key) {
+    if (key.startsWith('b:')) {
+      const b = BUILTIN_SOUNDS.find((x) => x.id === key);
+      if (!b) return null;
+      const off = this.builtinOff().has(key);
+      if (off) this.sql.exec('DELETE FROM builtin_off WHERE id = ?', key);
+      else this.sql.exec('INSERT OR IGNORE INTO builtin_off (id) VALUES (?)', key);
+      return { title: b.title, active: off };
+    }
+    if (key.startsWith('c:')) {
+      const id = Number(key.slice(2));
+      const row = this.sql.exec('SELECT title, active FROM sounds WHERE id = ?', id).toArray()[0];
+      if (!row) return null;
+      this.sql.exec('UPDATE sounds SET active = ? WHERE id = ?', row.active ? 0 : 1, id);
+      return { title: row.title, active: !row.active };
+    }
+    return null;
+  }
+
+  /** حذف نهائي لصوت مضاف. أصوات النظام تنعطل بس (ملفاتها جزء من اللعبة). */
+  deleteSound(key) {
+    if (key.startsWith('c:')) {
+      const id = Number(key.slice(2));
+      const row = this.sql.exec('SELECT title FROM sounds WHERE id = ?', id).toArray()[0];
+      if (!row) return null;
+      this.sql.exec('DELETE FROM sounds WHERE id = ?', id);
+      return { title: row.title, deleted: true };
+    }
+    if (key.startsWith('b:')) {
+      const b = BUILTIN_SOUNDS.find((x) => x.id === key);
+      if (!b) return null;
+      this.sql.exec('INSERT OR IGNORE INTO builtin_off (id) VALUES (?)', key);
+      return { title: b.title, deleted: false };
+    }
+    return null;
+  }
+
+  setBuiltinAll(active) {
+    if (active) this.sql.exec('DELETE FROM builtin_off');
+    else for (const b of BUILTIN_SOUNDS) this.sql.exec('INSERT OR IGNORE INTO builtin_off (id) VALUES (?)', b.id);
+    return true;
   }
   renameSound(id, title) {
     return this.sql.exec('UPDATE sounds SET title = ? WHERE id = ?', title, id).rowsWritten > 0;
@@ -117,7 +177,9 @@ export class Hub extends DurableObject {
         w: 3,
       }));
     let pool = custom;
-    if (mode !== 'custom' || custom.length < n) pool = [...pool, ...BUILTIN_SOUNDS.map((b) => ({ ...b, img: '', video: false, w: 1 }))];
+    const off = this.builtinOff();
+    const builtin = BUILTIN_SOUNDS.filter((b) => !off.has(b.id)).map((b) => ({ ...b, img: '', video: false, w: 1 }));
+    if (mode !== 'custom' || custom.length < n) pool = [...pool, ...builtin];
     const out = [];
     const rnd = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
     while (out.length < n && pool.length) {
@@ -142,7 +204,7 @@ export class Hub extends DurableObject {
     const token = (this.env.TELEGRAM_BOT_TOKEN || '').trim();
     if (!token) return { ok: false, reason: 'TELEGRAM_BOT_TOKEN غير مضبوط' };
     const digest = toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))).slice(0, 12);
-    const stamp = `${origin}|${digest}|v3`;
+    const stamp = `${origin}|${digest}|v4`;
     if (!force && this.getKV('webhook') === stamp) return { ok: true, cached: true, bot: this.getKV('bot') };
     const tg = new Tg(token, this.env.TG_API_BASE);
     try {
@@ -151,7 +213,7 @@ export class Hub extends DurableObject {
       await tg.call('setWebhook', {
         url: origin + '/api/telegram/webhook',
         secret_token: await webhookSecret(token),
-        allowed_updates: ['message'],
+        allowed_updates: ['message', 'callback_query'],
       });
       await tg.call('setMyCommands', {
         commands: [
@@ -180,6 +242,7 @@ export class Hub extends DurableObject {
       webhookError: this.getKV('webhook_error') || null,
       bot: this.getKV('bot'),
       sounds: this.sql.exec('SELECT COUNT(*) AS c FROM sounds WHERE active = 1').one().c,
+      builtinOn: BUILTIN_SOUNDS.length - this.builtinOff().size,
       players: this.sql.exec('SELECT COUNT(*) AS c FROM users').one().c,
     };
   }

@@ -48,16 +48,16 @@ export function performTimeline(listenAt, dur) {
 
 // قطع العجلة — بالترتيب مع عقارب الساعة ابتداءً من الأعلى
 export const WHEEL = [
-  { id: 'p10', kind: 'bonus', value: 10, label: '+10', icon: '⭐', color: '#7ed321', title: '+10 نقاط!', desc: 'عشر نقاط تنضاف لرصيدك' },
-  { id: 'echo', kind: 'sab', sab: 'echo', label: 'صدى', icon: '🔊', color: '#ff4fa3', title: 'صدى!', desc: 'اختار لاعب: تسجيله الجاي يطلع بصدى' },
-  { id: 'p20', kind: 'bonus', value: 20, label: '+20', icon: '🌟', color: '#2ec4b6', title: '+20 نقطة!', desc: 'عشرين نقطة تنضاف لرصيدك' },
-  { id: 'chip', kind: 'sab', sab: 'chip', label: 'سنجاب', icon: '🐿️', color: '#ff8c1a', title: 'سنجاب!', desc: 'اختار لاعب: صوته الجاي يصير مثل السنجاب' },
-  { id: 'x15', kind: 'mult', value: 1.5, label: '×1.5', icon: '✨', color: '#3a86ff', title: '×1.5', desc: 'نقاطك بالجولة الجاية تنضرب ×1.5' },
-  { id: 'chop', kind: 'sab', sab: 'chop', label: 'تقطيع', icon: '✂️', color: '#ff3b5c', title: 'تقطيع!', desc: 'اختار لاعب: تسجيله الجاي يتقطّع' },
-  { id: 'p5', kind: 'bonus', value: 5, label: '+5', icon: '⭐', color: '#8338ec', title: '+5 نقاط', desc: 'خمس نقاط تنضاف لرصيدك' },
-  { id: 'dist', kind: 'sab', sab: 'dist', label: 'تشويش', icon: '📢', color: '#00bbf9', title: 'تشويش!', desc: 'اختار لاعب: تسجيله الجاي يطلع مشوّش' },
-  { id: 'x2', kind: 'mult', value: 2, label: '×2', icon: '💎', color: '#ffd60a', title: '×2', desc: 'نقاطك بالجولة الجاية تتضاعف' },
-  { id: 'crap', kind: 'sab', sab: 'crap', label: 'ضرطة', icon: '💩', color: '#9ef01a', title: 'ضرطة!', desc: 'اختار لاعب: الكل راح يسمع ضرطة بدل تسجيله!' },
+  { id: 'p10', kind: 'bonus', value: 10, label: '+10', icon: '⭐', color: '#a6dc2c', title: '+10 نقاط!', desc: 'عشر نقاط تنضاف لرصيدك' },
+  { id: 'echo', kind: 'sab', sab: 'echo', label: 'صدى', icon: '🔊', color: '#2ccfc6', title: 'صدى!', desc: 'اختار لاعب: تسجيله الجاي يطلع بصدى' },
+  { id: 'p20', kind: 'bonus', value: 20, label: '+20', icon: '🌟', color: '#27a7f2', title: '+20 نقطة!', desc: 'عشرين نقطة تنضاف لرصيدك' },
+  { id: 'chip', kind: 'sab', sab: 'chip', label: 'سنجاب', icon: '🐿️', color: '#3d6cf0', title: 'سنجاب!', desc: 'اختار لاعب: صوته الجاي يصير مثل السنجاب' },
+  { id: 'x15', kind: 'mult', value: 1.5, label: '×1.5', icon: '✨', color: '#8b4fe6', title: '×1.5', desc: 'نقاطك بالجولة الجاية تنضرب ×1.5' },
+  { id: 'chop', kind: 'sab', sab: 'chop', label: 'تقطيع', icon: '✂️', color: '#c23fe0', title: 'تقطيع!', desc: 'اختار لاعب: تسجيله الجاي يتقطّع' },
+  { id: 'p5', kind: 'bonus', value: 5, label: '+5', icon: '⭐', color: '#ff3d9e', title: '+5 نقاط', desc: 'خمس نقاط تنضاف لرصيدك' },
+  { id: 'dist', kind: 'sab', sab: 'dist', label: 'تشويش', icon: '📢', color: '#ff5656', title: 'تشويش!', desc: 'اختار لاعب: تسجيله الجاي يطلع مشوّش' },
+  { id: 'x2', kind: 'mult', value: 2, label: '×2', icon: '💎', color: '#ff992b', title: '×2', desc: 'نقاطك بالجولة الجاية تتضاعف' },
+  { id: 'crap', kind: 'sab', sab: 'crap', label: 'ضرطة', icon: '💩', color: '#ffd23a', title: 'ضرطة!', desc: 'اختار لاعب: الكل راح يسمع ضرطة بدل تسجيله!' },
 ];
 
 export const WHEEL_WEIGHTS = { p10: 1.2, echo: 1, p20: 0.8, chip: 1, x15: 0.9, chop: 1, p5: 1.2, dist: 1, x2: 0.5, crap: 1 };

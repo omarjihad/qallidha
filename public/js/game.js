@@ -1,4 +1,5 @@
 // متحكّم اللعبة: يحوّل حالة السيرفر إلى صوت وحركة وواجهة، بتوقيت متزامن عند الكل.
+// اللقطات مثل الأصلية: لقطة واسعة للمسرح، شاشة المثال، «حاول تقلّدها»، ولقطة قريبة لشخصيتك وقت التسجيل.
 
 import { T, WHEEL, SAB_INFO, REACTIONS, ROUNDS } from './shared.js';
 import { SR, mulawEncode, mulawDecode, hashString, peakOf } from './dsp.js';
@@ -11,8 +12,11 @@ import * as ui from './ui.js';
 import { $, el } from './ui.js';
 import { haptic, closingConfirmation, backButton, shareText } from './tg.js';
 
+// مهلة قبل بداية موجة المثال داخل نافذة التسجيل (ثواني) — الناس تبدي متأخرة شوية بعد «يلا!»
+const LEAD = 0.25;
+
 const SPEAKER_SVG =
-  '<svg viewBox="0 0 24 24" width="100%" height="100%"><path fill="#38d430" stroke="#0f5a0c" stroke-width="1.2" d="M3 9h4l5-4v14l-5-4H3z"/><path fill="none" stroke="#38d430" stroke-width="2.4" stroke-linecap="round" d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>';
+  '<svg viewBox="0 0 24 24" width="100%" height="100%"><path fill="#34d12c" stroke="#0f5a0c" stroke-width="1.1" d="M3 9h4l5-4v14l-5-4H3z"/><path fill="none" stroke="#34d12c" stroke-width="2.4" stroke-linecap="round" d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>';
 
 export class Game {
   constructor({ stage, audio, config, onExit }) {
@@ -26,13 +30,13 @@ export class Game {
     this.me = null;
     this.timers = [];
     this.takes = new Map(); // `${round}:${uid}` → Uint8Array
-    this.processed = new Map(); // `${round}:${uid}` → Float32Array (بعد التخريب)
+    this.processed = new Map(); // `${gameNo}:${round}:${uid}` → Float32Array بعد التخريب
     this.scored = new Set();
     this.sentLoaded = new Set();
     this.sentTake = new Set();
     this.revealed = new Set();
     this.labels = new Map();
-    this.talkers = new Map(); // uid → analyser
+    this.talkers = new Map();
     this.wavebar = new ui.WaveBar($('#wavebar'));
     this.wheel = null;
     this.wheelSpunFor = null;
@@ -51,6 +55,7 @@ export class Game {
     this.code = code;
     document.documentElement.dataset.screen = 'room';
     ui.closeOverlay();
+    this.stage.setShot('wide');
     this.renderLobbyBar({ connecting: true });
     this.conn = new RoomConnection(code, {
       hello: (m) => {
@@ -60,8 +65,8 @@ export class Game {
       take: (t) => this.onTake(t),
       react: (m) => this.showReaction(m.uid, m.e),
       error: (m) => {
-        ui.toast(m.m || 'صار خطأ');
-        if (['started', 'full', 'kicked'].includes(m.code)) setTimeout(() => this.leave(true), 400);
+        ui.toast(m.m || 'صار خطأ', 3500);
+        if (['started', 'full', 'kicked', 'notfound'].includes(m.code)) setTimeout(() => this.leave(true), 600);
       },
       status: (s) => this.onStatus(s),
     });
@@ -89,6 +94,7 @@ export class Game {
     for (const l of this.labels.values()) {
       l.el.remove();
       l.hit.remove();
+      l.fx.remove();
     }
     this.labels.clear();
     $('#netState').className = '';
@@ -97,8 +103,12 @@ export class Game {
     $('#cards').innerHTML = '';
     $('#lobbyBar').innerHTML = '';
     $('#hudInfo').innerHTML = '';
-    $('#reacts').classList.remove('show');
+    $('#reacts').classList.remove('show', 'open');
+    delete document.documentElement.dataset.phase;
+    delete document.documentElement.dataset.targeting;
+    this.setDim(null);
     this.wavebar.show(false);
+    this.setCount('');
     this.hideWheel();
     ui.clearCenter();
     ui.hideMeme();
@@ -119,15 +129,14 @@ export class Game {
     }
   }
 
-  /* ================================================== أدوات التوقيت */
+  /* ================================================== أدوات */
 
   serverNow() {
     return this.conn ? this.conn.serverNow() : Date.now();
   }
 
   at(serverTs, fn) {
-    const delay = serverTs - this.serverNow();
-    const h = setTimeout(fn, Math.max(0, delay));
+    const h = setTimeout(fn, Math.max(0, serverTs - this.serverNow()));
     this.timers.push(h);
     return h;
   }
@@ -145,6 +154,22 @@ export class Game {
     return this.st && this.st.players.find((p) => p.uid === uid);
   }
 
+  /** ستارة عنابية فوق المسرح: full = تغطي كلشي (شاشة المثال)، null = تختفي */
+  setDim(mode) {
+    $('#dim').className = mode ? 'show ' + mode : '';
+  }
+
+  /** رقم العد فوق شريط الموجة (مثل الأصلية) */
+  setCount(text) {
+    const b = $('#countBadge');
+    b.textContent = text;
+    b.classList.remove('pop');
+    if (text) {
+      void b.offsetWidth;
+      b.classList.add('pop');
+    }
+  }
+
   /* ================================================== تطبيق الحالة */
 
   apply(st) {
@@ -155,12 +180,10 @@ export class Game {
     this.syncLabels();
     const key = `${st.gameNo}:${st.round}:${st.phase}`;
     if (key !== this.phaseKey) {
-      const was = this.phaseKey;
       this.phaseKey = key;
-      this.enterPhase(st, prev, was);
-    } else this.updatePhase(st, prev);
+      this.enterPhase(st, prev);
+    } else this.updatePhase(st);
     this.renderCardsNow();
-    this.renderHud();
   }
 
   renderCardsNow() {
@@ -185,21 +208,15 @@ export class Game {
     ui.renderCards(players, { me: this.me, host: st.host, gains, badges });
   }
 
-  renderHud() {
-    const st = this.st;
-    const info = $('#hudInfo');
-    if (!st) return;
-    const inGame = st.phase !== 'lobby' && st.phase !== 'final';
-    info.innerHTML = '';
-    if (inGame) info.appendChild(el('div', { class: 'pill' }, `الجولة ${st.round}/${st.rounds}`));
-    else if (st.phase === 'final') info.appendChild(el('div', { class: 'pill dim' }, `الغرفة ${st.code}`));
-  }
-
-  enterPhase(st, prev, was) {
+  enterPhase(st) {
     this.clearTimers();
     ui.clearCenter();
+    this.setCount('');
+    $('#goText').classList.remove('show');
+    document.documentElement.dataset.phase = st.phase;
     this.targeting = false;
     this.setTargeting(false);
+    this.setFocusLabel(null);
     const inGame = st.phase !== 'lobby' && st.phase !== 'final';
     closingConfirmation(inGame);
     $('#reacts').classList.toggle('show', st.phase !== 'lobby');
@@ -208,14 +225,18 @@ export class Game {
       ui.hideMeme();
       this.wavebar.show(false);
       this.audio.disarm();
+      this.setDim(null);
+      $('#caption').textContent = '';
     }
     if (st.phase !== 'final') ui.closeOverlay();
     for (const [uid, c] of this.stage.chars) {
       c.talkTarget = 0;
-      if (st.phase !== 'playback' && (c.atMic || c.aside)) this.stage.unfocus(uid);
+      if (st.phase !== 'playback' && c.atMic) this.stage.unfocus(uid);
     }
     this.setSpeakers([]);
     if (st.phase !== 'lobby') $('#lobbyBar').innerHTML = '';
+    if (st.phase !== 'perform') this.stage.setShot('wide');
+    $('#hudInfo').innerHTML = '';
 
     switch (st.phase) {
       case 'lobby':
@@ -233,7 +254,7 @@ export class Game {
         this.runPerform(st);
         break;
       case 'analyze':
-        ui.banner('⏳ جاري التحليل…', 'small sticky', 0);
+        ui.banner('جاري التحليل…', 'small sticky', 0);
         this.maybeScore();
         break;
       case 'playback':
@@ -243,6 +264,7 @@ export class Game {
         this.runWheel(st);
         break;
       case 'final':
+        $('#hudInfo').appendChild(el('div', { class: 'pill dim' }, `الغرفة ${st.code}`));
         this.runFinal(st);
         break;
       default:
@@ -271,7 +293,6 @@ export class Game {
     const mic = this.audio.micState;
     const micOk = mic === 'on' || (this.player(this.me) || {}).mic;
     const n = st.players.length;
-    // ما نعيد بناء الأزرار إلا إذا تغيّر شي يخصها (حتى ما تضيع اللمسة)
     const sig = [isHost, micOk, mic, n, st.code].join('|');
     if (sig === this.lobbySig && bar.firstChild) return;
     this.lobbySig = sig;
@@ -293,11 +314,14 @@ export class Game {
           : el('div', { class: 'lobby-wait' }, '⏳ بانتظار المضيف يبدي…'),
       ),
     );
-    const hint = $('#center');
-    if (!hint.querySelector('.lobby-hint')) {
+    const center = $('#center');
+    const txt = n < 2 ? 'ادعُ ربعك — لحد 5 لاعبين 🎤' : `${n} لاعبين بالغرفة`;
+    const hint = center.querySelector('.lobby-hint');
+    if (hint) hint.textContent = txt;
+    else {
       ui.clearCenter();
-      hint.appendChild(el('div', { class: 'lobby-hint' }, n < 2 ? 'ادعُ ربعك — لحد 5 لاعبين 🎤' : `${n} لاعبين بالغرفة`));
-    } else hint.querySelector('.lobby-hint').textContent = n < 2 ? 'ادعُ ربعك — لحد 5 لاعبين 🎤' : `${n} لاعبين بالغرفة`;
+      center.appendChild(el('div', { class: 'lobby-hint' }, txt));
+    }
   }
 
   inviteLink() {
@@ -377,12 +401,20 @@ export class Game {
     });
   }
 
-  /* ================================================== الأداء: اسمع ← قلّد */
+  /* ================================================== الأداء: اسمع ← حاول تقلّدها ← عد ← سجّل */
 
   async runPerform(st) {
     const t = st.t;
     const sound = st.sound || {};
     const round = st.round;
+    const late0 = this.serverNow() > t.countAt;
+
+    // 1) ستارة عنابية + «حاول.. تقلّدها!» تطير حروفها (مثل الأصلية) والمثال يشتغل وياها
+    if (!late0) {
+      this.setDim('full');
+      ui.reproduceBanner(Math.max(500, t.countAt - this.serverNow() - 60));
+      this.audio.sfx('whoosh');
+    }
     let entry = null;
     try {
       entry = await this.audio.load(sound.url, { video: sound.video });
@@ -393,14 +425,15 @@ export class Game {
     if (!this.active || !this.st || this.st.round !== round || this.st.phase !== 'perform') return;
     this.refEntry = entry;
     const now = this.serverNow();
+    const late = now > t.recAt + 300;
+    const dur = Math.max(0.2, (t.listenEnd - t.listenAt) / 1000);
+    const win = t.recDur / 1000;
 
-    // 1) المثال
-    const media = ui.showMeme(sound, entry);
-    $('#caption').textContent = 'اسمع زين للمثال 👂';
-    this.wavebar.setRef(entry ? entry.peaks : new Float32Array(200).fill(0.3));
+    this.wavebar.setRef(entry ? entry.peaks : null, dur, win, LEAD);
     this.wavebar.mode = 'listen';
     this.wavebar.show(true);
-    this.setSpeakers(this.st.players.map((p) => p.uid));
+    $('#caption').textContent = sound.title ? `${sound.emoji ? sound.emoji + ' ' : ''}${sound.title}` : '';
+    const media = now < t.countAt ? ui.showMeme(sound, entry) : null;
     if (entry && now < t.listenEnd) {
       if (!this.audio.running) this.tapToHear(entry, t);
       this.audio.play(entry.buffer, this.ctxTime(t.listenAt));
@@ -415,18 +448,10 @@ export class Game {
         });
       }
     }
-    this.progressAnim = { from: t.listenAt, to: t.listenEnd, kind: 'listen' };
+    this.progressAnim = { from: t.listenAt, to: t.listenEnd, t0: LEAD, t1: LEAD + dur, fill: false };
 
-    // 2) حاول تقلّدها
+    // المايك ينفتح بعد ما يخلص المثال (حتى ما يلقط الصوت من السماعة)
     this.at(t.reproduceAt, () => {
-      ui.hideMeme();
-      this.setSpeakers([]);
-      this.progressAnim = null;
-      this.wavebar.progress = -1;
-      ui.banner('حاول تقلّدها!', 'bubble reproduce', T.REPRODUCE - 150);
-      $('#caption').textContent = 'الكل سوا — فرصة وحدة بس!';
-      this.audio.sfx('whoosh');
-      // iOS: نرجّع المايك قبل العد
       if (this.audio.micState !== 'on')
         this.audio.openMic().then((ok) => {
           if (!ok) return;
@@ -435,42 +460,47 @@ export class Game {
         });
     });
 
-    // 3) العد
+    // 2) العد: الستارة تنشال والكاميرا تقرب على شخصيتك، والأرقام على الشريط
+    this.at(t.countAt, () => {
+      ui.clearCenter();
+      ui.hideMeme();
+      this.setDim(null);
+      this.stage.setShot('closeup', this.me);
+      this.progressAnim = null;
+      this.wavebar.mode = 'count';
+      this.wavebar.time = 0;
+      this.wavebar.fillTo = -1;
+      $('#caption').textContent = 'الكل سوا — فرصة وحدة بس!';
+    });
     for (let k = 0; k < 3; k++) {
       this.at(t.countAt + k * T.COUNT_STEP, () => {
-        ui.clearCenter();
-        ui.banner(String(3 - k), 'count', T.COUNT_STEP - 80);
+        this.setCount(String(3 - k));
         this.audio.sfx('tick');
         haptic('light');
       });
     }
     this.at(t.countAt + T.COUNT_STEP, () => this.armIfNeeded());
 
-    // 4) سجّل!
+    // 3) يلا! — التسجيل: المؤشر يمشي والموجة تتلوّن زرقاء
     this.at(t.recAt, () => {
       this.armIfNeeded();
-      ui.clearCenter();
-      ui.banner('يلا! 🎤', 'go', 700);
+      this.setCount('');
+      $('#caption').textContent = '';
+      $('#goText').classList.add('show');
       this.audio.sfx('go');
       haptic('medium');
       this.wavebar.mode = 'record';
-      this.progressAnim = { from: t.recAt, to: t.recEnd, kind: 'record' };
-      for (const c of this.stage.chars.values()) c.setMood('sing', t.recDur);
+      this.progressAnim = { from: t.recAt, to: t.recEnd, t0: 0, t1: win, fill: true };
       const mine = this.stage.char(this.me);
-      if (mine) mine.mood = 'idle';
-      const recStart = this.ctxTime(t.recAt);
-      const recLen = t.recDur / 1000;
+      for (const [uid, c] of this.stage.chars) if (uid !== this.me) c.setMood('sing', t.recDur);
       this.audio.onChunk = (time, d) => {
         let p = 0;
         for (let i = 0; i < d.length; i++) p = Math.max(p, Math.abs(d[i]));
-        const frac = (time - recStart) / recLen;
-        if (frac >= 0 && frac <= 1) this.wavebar.pushTake(frac, Math.min(1, p * 1.6));
-        if (mine) mine.talkTarget = Math.min(1, p * 2.5);
+        if (mine) mine.talkTarget = Math.min(1, p * 3);
       };
     });
 
-    // 5) انتهى التسجيل → إرسال
-    const late = now > t.recAt + 300;
+    // 4) انتهى ← إرسال
     this.at(t.recEnd + 120, () => this.finishTake(st, late));
   }
 
@@ -509,11 +539,17 @@ export class Game {
     if (mine) mine.talkTarget = 0;
     this.progressAnim = null;
     let pcm;
-    if (!late && this.audio.micState === 'on' && this.audio.chunks.length) {
+    if (!late && hadMic && this.audio.chunks.length) {
       pcm = this.audio.extract(this.ctxTime(st.t.recAt), this.ctxTime(st.t.recEnd));
     } else pcm = new Float32Array(Math.floor(0.3 * SR));
     this.audio.disarm();
     if (this.audio.releaseAfterRecord) this.audio.closeMic();
+    // نكبّر الصوت الواطي قبل الإرسال حتى ينسمع زين بالإعادة (والصمت يبقى صمت)
+    const pk = peakOf(pcm);
+    if (pk >= 0.006) {
+      const g = Math.min(20, 0.9 / pk);
+      for (let i = 0; i < pcm.length; i++) pcm[i] *= g;
+    }
     const enc = mulawEncode(pcm);
     const out = new Uint8Array(enc.length + 4);
     out[0] = 1;
@@ -522,9 +558,11 @@ export class Game {
     this.takes.set(`${round}:${this.me}`, enc);
     this.conn && this.conn.sendBinary(out);
     this.wavebar.show(false);
+    $('#goText').classList.remove('show');
     $('#caption').textContent = '';
+    this.stage.setShot('wide');
     ui.clearCenter();
-    ui.banner('⏳ جاري التحليل…', 'small sticky', 0);
+    ui.banner('جاري التحليل…', 'small sticky', 0);
     if (!hadMic) ui.toast('ما وصلنا صوتك — شغّل المايك من غرفة الانتظار', 3500);
   }
 
@@ -581,14 +619,13 @@ export class Game {
     for (const item of st.play || []) {
       const p = this.player(item.uid);
       if (!p) continue;
-      // بعد إعادة الاتصال: اللي فات وقته ما نعيده
       if (now > item.at + (item.walk || 0) + (item.dur || 0) + T.REVEAL) {
         this.revealed.add(item.uid);
         continue;
       }
-      const c = () => this.stage.char(item.uid);
       if (item.none) {
         this.at(item.at, () => {
+          this.setFocusLabel(null);
           ui.banner(`🤐 ${p.name} ما سجّل`, 'small', T.NOTAKE - 200);
           this.revealed.add(item.uid);
           this.renderCardsNow();
@@ -598,6 +635,7 @@ export class Game {
       const res = results[item.uid] || { raw: 0, mult: 1, sab: [] };
       this.at(item.at, () => {
         this.stage.focus(item.uid);
+        this.setFocusLabel(item.uid);
         this.audio.sfx('whoosh', 0.6);
       });
       this.at(item.at + item.walk, () => {
@@ -612,8 +650,9 @@ export class Game {
           }
         }
         if (pcm) {
-          const { analyser } = this.audio.play(this.audio.pcmBuffer(pcm), 0, { analyse: true, gain: 1.15 });
+          const { analyser } = this.audio.play(this.audio.pcmBuffer(pcm), null, { analyse: true, gain: 1.1 });
           this.talkers.set(item.uid, analyser);
+          this.lastPlayback = { uid: item.uid, analyser, max: 0 };
         }
         if (res.sab && res.sab.length) {
           const by = ((st.sab && st.sab[item.uid]) || []).map((s) => (this.player(s.by) || {}).name).filter(Boolean);
@@ -624,7 +663,7 @@ export class Game {
       });
       this.at(item.at + item.walk + item.dur, () => {
         this.talkers.delete(item.uid);
-        const ch = c();
+        const ch = this.stage.char(item.uid);
         if (ch) {
           ch.talkTarget = 0;
           ch.setMood(res.raw >= 70 ? 'happy' : res.raw <= 15 ? 'sad' : 'idle', 1800);
@@ -637,7 +676,10 @@ export class Game {
         this.revealed.add(item.uid);
         this.renderCardsNow();
       });
-      this.at(item.at + item.walk + item.dur + T.REVEAL, () => this.stage.unfocus(item.uid));
+      this.at(item.at + item.walk + item.dur + T.REVEAL, () => {
+        this.stage.unfocus(item.uid);
+        this.setFocusLabel(null);
+      });
     }
   }
 
@@ -645,28 +687,30 @@ export class Game {
 
   runWheel(st) {
     this.wheelLanded = false;
+    this.setDim('soft');
     const box = $('#wheel');
     box.innerHTML = '';
     box.className = 'show';
-    const holder = el('div', { class: 'wheel-holder' });
-    const status = el('div', { class: 'wheel-status' }, '');
-    const btn = el('button', { class: 'btn pink big spin-btn', onclick: () => this.spin() }, '🎡 دوّر العجلة!');
-    box.appendChild(el('div', { class: 'wheel-side' }, el('div', { class: 'wheel-title bubble-sm' }, 'عجلة الحظ'), status, btn));
+    const holder = el('div', { class: 'wheel-holder', role: 'button', 'aria-label': 'دوّر العجلة' });
+    const status = el('div', { class: 'wheel-status' });
     box.appendChild(holder);
+    box.appendChild(status);
     this.wheel = new Wheel(holder);
-    this.wheelUi = { status, btn };
+    this.wheelUi = { status, holder };
     const mine = st.wheel && st.wheel[this.me];
-    if (!mine) {
-      btn.style.display = 'none';
-      status.textContent = 'تتفرّج هالجولة 👀';
-    }
+    if (mine && mine.seg == null) {
+      status.appendChild(el('div', { class: 'wheel-hint' }, 'اضغط على العجلة حتى تدور!'));
+      holder.classList.add('tappable');
+      holder.addEventListener('click', () => this.spin(), { once: true });
+    } else if (!mine) status.appendChild(el('div', { class: 'wheel-hint' }, 'تتفرّج هالجولة 👀'));
     this.updateWheel(st);
   }
 
   spin() {
-    if (!this.wheelUi) return;
-    this.wheelUi.btn.disabled = true;
-    this.wheelUi.btn.textContent = 'تدور…';
+    if (!this.wheelUi || this.wheelSpunFor === this.phaseKey) return;
+    this.wheelUi.holder.classList.remove('tappable');
+    this.wheelUi.status.innerHTML = '';
+    this.wheelUi.status.appendChild(el('div', { class: 'wheel-hint' }, 'جاري الدوران…'));
     haptic('medium');
     this.conn.send({ t: 'spin' });
   }
@@ -675,11 +719,12 @@ export class Game {
     if (!this.wheel || !st.wheel) return;
     const w = st.wheel[this.me];
     if (!w) return;
-    const { status, btn } = this.wheelUi;
+    const { status, holder } = this.wheelUi;
     if (w.seg != null && this.wheelSpunFor !== this.phaseKey) {
       this.wheelSpunFor = this.phaseKey;
-      btn.style.display = 'none';
-      status.textContent = 'تدور…';
+      holder.classList.remove('tappable');
+      status.innerHTML = '';
+      status.appendChild(el('div', { class: 'wheel-hint' }, 'جاري الدوران…'));
       const elapsed = this.serverNow() - (w.spunAt || this.serverNow());
       const dur = Math.max(1200, T.SPIN_ANIM - 300 - elapsed);
       this.wheel.spinTo(
@@ -693,37 +738,47 @@ export class Game {
           this.wheelLanded = true;
           const seg = WHEEL[w.seg];
           status.innerHTML = '';
-          status.appendChild(el('div', { class: 'wheel-result ' + seg.kind }, seg.icon + ' ' + seg.title));
+          status.appendChild(el('div', { class: 'wheel-result ' + seg.kind }, seg.title));
           status.appendChild(el('div', { class: 'wheel-desc' }, seg.desc));
           this.audio.sfx(seg.kind === 'sab' ? 'sab' : 'win', 0.8);
           haptic(seg.kind === 'sab' ? 'heavy' : 'success');
           this.renderCardsNow();
           const cur = this.st && this.st.wheel && this.st.wheel[this.me];
-          if (cur && cur.needTarget && !cur.done) this.beginTargeting();
+          if (cur && cur.needTarget && !cur.done) setTimeout(() => this.beginTargeting(), 1300);
         },
       );
     }
-    if (w.done && this.targeting) {
-      this.setTargeting(false);
-      this.targeting = false;
-      const victim = this.player(w.target);
-      if (victim) {
-        status.appendChild(el('div', { class: 'wheel-desc' }, `😈 خرّبت على ${victim.name}`));
-        $('#wheel').classList.remove('dim');
-      }
-    }
-    if (w.done && this.wheelLanded) {
-      const waiting = Object.entries(st.wheel).filter(([, x]) => !x.done).length;
+    if (w.done && this.targeting) this.endTargeting(w.target);
+    if (w.done && this.wheelLanded && !this.targeting) {
+      const waiting = Object.values(st.wheel).filter((x) => !x.done).length;
       const note = status.querySelector('.wheel-wait') || status.appendChild(el('div', { class: 'wheel-wait' }));
       note.textContent = waiting ? `بانتظار ${waiting} لاعبين…` : 'الجولة الجاية بعد شوية…';
     }
   }
 
   beginTargeting() {
+    const cur = this.st && this.st.wheel && this.st.wheel[this.me];
+    if (!cur || cur.done || this.st.phase !== 'wheel') return;
     this.targeting = true;
+    document.documentElement.dataset.targeting = '1';
     $('#wheel').classList.add('dim');
-    ui.banner('اختار واحد تخرّبله! 😈', 'small target', 0);
+    this.setDim(null);
+    this.stage.setShot('medium');
+    ui.clearCenter();
+    ui.banner('اختار واحد تخرّبله!', 'pick', 0);
     this.setTargeting(true);
+  }
+
+  endTargeting(targetUid) {
+    this.setTargeting(false);
+    this.targeting = false;
+    delete document.documentElement.dataset.targeting;
+    ui.clearCenter();
+    this.stage.setShot('wide');
+    $('#wheel').classList.remove('dim');
+    if (this.st && this.st.phase === 'wheel') this.setDim('soft');
+    const victim = this.player(targetUid);
+    if (victim && this.wheelUi) this.wheelUi.status.appendChild(el('div', { class: 'wheel-desc' }, `😈 خرّبت على ${victim.name}`));
   }
 
   pickTarget(uid) {
@@ -731,13 +786,11 @@ export class Game {
     haptic('heavy');
     this.audio.sfx('sab');
     this.conn.send({ t: 'target', uid });
-    ui.clearCenter();
-    this.setTargeting(false);
-    this.targeting = false;
-    $('#wheel').classList.remove('dim');
+    this.endTargeting(uid);
   }
 
   hideWheel() {
+    delete document.documentElement.dataset.targeting;
     const box = $('#wheel');
     box.className = '';
     box.innerHTML = '';
@@ -773,7 +826,13 @@ export class Game {
         ),
     );
     const rest = f.slice(3).map((r) => el('div', { class: 'rest-row' }, `${r.rank}. ${r.name} — ${r.score}`));
-    const confetti = el('div', { class: 'confetti' }, Array.from({ length: 36 }, (_, i) => el('i', { style: { left: `${(i * 97) % 100}%`, animationDelay: `${(i % 12) * 0.12}s`, background: ['#ff4f8b', '#ffd60a', '#3a86ff', '#7ed321', '#ff8c1a'][i % 5] } })));
+    const confetti = el(
+      'div',
+      { class: 'confetti' },
+      Array.from({ length: 36 }, (_, i) =>
+        el('i', { style: { left: `${(i * 97) % 100}%`, animationDelay: `${(i % 12) * 0.12}s`, background: ['#ff4f8b', '#ffd60a', '#3a86ff', '#7ed321', '#ff8c1a'][i % 5] } }),
+      ),
+    );
     const panel = el(
       'div',
       { class: 'final' },
@@ -799,7 +858,7 @@ export class Game {
     shareText(this.inviteLink(), `🎤 نتيجة «قلّدها»:\n${lines}\n\nتگدر تغلبنا؟ 😏`);
   }
 
-  /* ================================================== تسميات فوق الشخصيات */
+  /* ================================================== أسماء فوق الشخصيات */
 
   syncLabels() {
     const st = this.st;
@@ -809,6 +868,7 @@ export class Game {
       if (!ids.has(uid)) {
         l.el.remove();
         l.hit.remove();
+        l.fx.remove();
         this.labels.delete(uid);
       }
     }
@@ -817,17 +877,25 @@ export class Game {
       if (!l) {
         const name = el('div', { class: 'plabel-name' });
         const spk = el('div', { class: 'plabel-spk', html: SPEAKER_SVG });
-        const lab = el('div', { class: 'plabel' }, spk, name);
+        const arrow = el('div', { class: 'plabel-me' });
+        const lab = el('div', { class: 'plabel' }, spk, name, arrow);
         const hit = el('div', { class: 'phit', onclick: () => this.pickTarget(p.uid) });
+        const fx = el('div', { class: 'pfx' });
         layer.appendChild(lab);
         layer.appendChild(hit);
-        l = { el: lab, name, spk, hit };
+        layer.appendChild(fx);
+        l = { el: lab, name, spk, hit, fx };
         this.labels.set(p.uid, l);
       }
       l.name.textContent = p.name;
       l.el.classList.toggle('me', p.uid === this.me);
       l.el.classList.toggle('off', p.on === false);
     }
+  }
+
+  /** وقت الإعادة يبين اسم اللي على المايك بس (مثل الأصلية) */
+  setFocusLabel(uid) {
+    for (const [id, l] of this.labels) l.el.classList.toggle('focus', id === uid);
   }
 
   setSpeakers(uids) {
@@ -848,7 +916,7 @@ export class Game {
     const l = this.labels.get(uid);
     if (!l) return;
     const b = el('div', { class: 'react-bubble' }, e);
-    l.el.appendChild(b);
+    l.fx.appendChild(b);
     setTimeout(() => b.remove(), 1600);
   }
 
@@ -862,29 +930,34 @@ export class Game {
 
   onFrame() {
     if (!this.active || !this.st) return;
-    // تسميات
+    const H = this.stage.h || 1;
     for (const [uid, l] of this.labels) {
       const p = this.stage.screenPos(uid);
       if (!p) continue;
-      l.el.style.transform = `translate(${p.x}px, ${p.y}px)`;
-      const feet = this.stage.screenPos(uid, 0);
-      if (feet) {
-        const h = Math.max(40, feet.y - p.y);
-        l.hit.style.transform = `translate(${p.x - h * 0.3}px, ${p.y}px)`;
-        l.hit.style.width = `${h * 0.6}px`;
-        l.hit.style.height = `${h}px`;
-      }
+      // حجم الاسم يتبع حجم الشخصية على الشاشة (لقطة واسعة صغير، قريبة كبير)
+      const charH = Math.max(10, p.feetY - p.y);
+      const fs = Math.max(11, Math.min(H * 0.072, charH * 0.19));
+      l.el.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px)`;
+      l.el.style.fontSize = fs.toFixed(1) + 'px';
+      l.fx.style.transform = l.el.style.transform;
+      const h = Math.max(40, charH);
+      l.hit.style.transform = `translate(${p.x - h * 0.3}px, ${p.y}px)`;
+      l.hit.style.width = `${h * 0.6}px`;
+      l.hit.style.height = `${h}px`;
     }
-    // مزامنة الفم مع الصوت
     for (const [uid, an] of this.talkers) {
       const c = this.stage.char(uid);
-      if (c) c.talkTarget = AudioEngine.level(an);
+      const lv = AudioEngine.level(an);
+      if (c) c.talkTarget = lv;
+      if (this.lastPlayback && this.lastPlayback.uid === uid) this.lastPlayback.max = Math.max(this.lastPlayback.max, lv);
     }
-    // شريط الموجة
     if (this.progressAnim) {
       const now = this.serverNow();
-      const { from, to } = this.progressAnim;
-      this.wavebar.progress = Math.max(0, Math.min(1, (now - from) / (to - from)));
+      const { from, to, t0, t1, fill } = this.progressAnim;
+      const f = Math.max(0, Math.min(1, (now - from) / Math.max(1, to - from)));
+      const tm = t0 + f * (t1 - t0);
+      this.wavebar.time = tm;
+      if (fill) this.wavebar.fillTo = tm;
     }
     if (this.wavebar.root.classList.contains('show')) this.wavebar.draw();
   }

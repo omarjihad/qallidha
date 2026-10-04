@@ -2,9 +2,6 @@
 
 import { SR, resample, toMono, peaks, peakOf } from './dsp.js';
 import { MAX_REC } from './shared.js';
-import { platform } from './tg.js';
-
-const isIOS = platform === 'ios' || /iPad|iPhone|iPod/.test(navigator.userAgent);
 
 const WORKLET_SRC = `
 class QdRec extends AudioWorkletProcessor {
@@ -171,9 +168,14 @@ export class AudioEngine {
 
   /* ------------------------------------------------------------ التشغيل */
 
-  /** يشغّل AudioBuffer بوقت سياق محدد. يرجع {source, analyser}. */
-  play(buffer, when = 0, { gain = 1, analyse = false } = {}) {
+  /**
+   * يشغّل AudioBuffer. when = وقت سياق (ثواني) للتشغيل المتزامن، أو null = هسه.
+   * إذا الوقت فات (اتصال متأخر) يبدي من النقطة اللي وصلها الكل بدل ما يبدي من الأول.
+   */
+  play(buffer, when = null, { gain = 1, analyse = false } = {}) {
     const ctx = this.ensureCtx();
+    // بعد إطفاء المايك بعض الأجهزة توكّف السياق: نرجّعه (ينجح لأن المستخدم لمس الشاشة قبل)
+    if (ctx.state !== 'running' && ctx.state !== 'closed') ctx.resume().catch(() => null);
     const src = ctx.createBufferSource();
     src.buffer = buffer;
     const g = ctx.createGain();
@@ -186,10 +188,15 @@ export class AudioEngine {
       g.connect(analyser);
     }
     g.connect(this.master);
-    const t = Math.max(ctx.currentTime, when);
-    const late = Math.max(0, ctx.currentTime - when);
+    const now = ctx.currentTime;
+    let startAt = now;
+    let offset = 0;
+    if (when !== null && when !== undefined && Number.isFinite(when)) {
+      if (when >= now) startAt = when;
+      else offset = Math.min(now - when, Math.max(0, buffer.duration - 0.02));
+    }
     try {
-      src.start(t, Math.min(late, buffer.duration - 0.01 > 0 ? buffer.duration - 0.01 : 0));
+      src.start(startAt, offset);
     } catch {
       src.start();
     }
@@ -220,7 +227,7 @@ export class AudioEngine {
     this.micState = 'asking';
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 },
       });
     } catch (e) {
       this.micState = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError') ? 'denied' : 'error';
@@ -283,9 +290,12 @@ export class AudioEngine {
     if (this.micState === 'on') this.micState = 'off';
   }
 
-  /** على iOS نطفي المايك بعد كل تسجيل حتى يرجع الصوت للسماعة الكبيرة. */
+  /**
+   * نطفي المايك بعد كل تسجيل (iOS وأندرويد): المايك المفتوح يحوّل الصوت لوضع المكالمة
+   * فيطلع التشغيل واطي أو من سماعة الأذن. ينفتح من جديد قبل التسجيل الجاي تلقائيًا.
+   */
   get releaseAfterRecord() {
-    return isIOS;
+    return true;
   }
 
   pushChunk(t, d) {
@@ -359,6 +369,6 @@ export class AudioEngine {
     if (!this.running || this.muted) return;
     if (!this.sfxBufs) this.buildSfx();
     const b = this.sfxBufs[name];
-    if (b) this.play(b, 0, { gain: 0.7 * gain });
+    if (b) this.play(b, null, { gain: 0.7 * gain });
   }
 }

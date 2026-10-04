@@ -53,12 +53,45 @@ function mediaOf(msg) {
 
 const lines = (...l) => l.map((s) => (s ? RLM + s : '')).join('\n');
 
+const PER_PAGE = 10;
+
+/** قائمة الأصوات للأدمن: كل صوت زر يفعّل/يعطّل، و🗑️ يحذف أصواتك نهائيًا. */
+export async function soundsMenu(hub, page = 0) {
+  const all = await hub.listAll();
+  const pages = Math.max(1, Math.ceil(all.length / PER_PAGE));
+  page = Math.max(0, Math.min(pages - 1, page | 0));
+  const rows = all.slice(page * PER_PAGE, page * PER_PAGE + PER_PAGE).map((x) => {
+    const row = [{ text: `${x.active ? '✅' : '🚫'} ${x.emoji} ${x.title}`.slice(0, 60), callback_data: `t|${x.key}|${page}` }];
+    row.push({ text: '🗑️', callback_data: `d|${x.key}|${page}` });
+    return row;
+  });
+  const builtinOn = all.some((x) => x.kind === 'builtin' && x.active);
+  rows.push([{ text: builtinOn ? '🔇 عطّل كل أصوات النظام' : '🔊 رجّع كل أصوات النظام', callback_data: `ba|${builtinOn ? 0 : 1}|${page}` }]);
+  if (pages > 1) {
+    const nav = [];
+    if (page > 0) nav.push({ text: '→ السابق', callback_data: `p||${page - 1}` });
+    nav.push({ text: `${page + 1} / ${pages}`, callback_data: `p||${page}` });
+    if (page < pages - 1) nav.push({ text: 'التالي ←', callback_data: `p||${page + 1}` });
+    rows.push(nav);
+  }
+  const on = all.filter((x) => x.active).length;
+  const text = lines(
+    `🎵 الأصوات: ${on} شغّالة من ${all.length}`,
+    '',
+    'اضغط على الصوت حتى تعطّله 🚫 أو ترجّعه ✅',
+    '🗑️ = يطلع من اللعبة (أصواتك تنحذف نهائيًا، وأصوات النظام تنعطل)',
+    on === 0 ? '⚠️ ماكو ولا صوت شغّال — اللعبة ما تبدي' : on < 4 ? `⚠️ ${on} أصوات بس = ${on} جولات` : '',
+  );
+  return { text, reply_markup: { inline_keyboard: rows } };
+}
+
 /**
  * يعالج تحديثًا واحدًا من تيليجرام. لا يرمي أبدًا.
  * deps: { env, origin, hub, claimRoom(chatId) → code }
  */
 export async function handleUpdate(update, deps) {
   const { env, origin, hub } = deps;
+  if (update.callback_query) return handleCallback(update.callback_query, deps);
   const msg = update.message;
   if (!msg || !msg.chat) return;
   const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
@@ -149,7 +182,7 @@ export async function handleUpdate(update, deps) {
     if (cmd === '/help') {
       const base = ['/play — سوّي غرفة لعب', '/top — المتصدرين', '/id — الآيدي مالتك'];
       const adm = isAdmin
-        ? ['', 'أوامر الأدمن:', 'دز صوت / فويس / فيديو = ينضاف للعبة (الكابشن = اسمه)', '/sounds — كل الأصوات', '/del رقم — حذف صوت', '/title رقم اسم — تغيير الاسم']
+        ? ['', 'أوامر الأدمن:', 'دز صوت / فويس / فيديو = ينضاف للعبة (الكابشن = اسمه)', '/sounds — كل الأصوات (تعطيل وحذف بالأزرار)', '/title رقم اسم — تغيير الاسم']
         : [];
       await send(lines(...base, ...adm));
       return;
@@ -157,10 +190,8 @@ export async function handleUpdate(update, deps) {
 
     // ---------- أوامر الأدمن
     if (isAdmin && cmd === '/sounds') {
-      const list = await hub.listSounds();
-      if (!list.length) return void (await send(lines('ماكو أصوات مضافة بعد. دزلي فويس أو مقطع صوت/فيديو وينضاف.')));
-      const out = list.map((s) => `#${s.id} — ${s.title}${s.img_file_id ? ' 🖼️' : ''}${s.kind === 'video' ? ' 🎬' : ''}${s.active ? '' : ' (محذوف)'}`);
-      for (let i = 0; i < out.length; i += 60) await send(lines(...out.slice(i, i + 60)));
+      const menu = await soundsMenu(hub, 0);
+      await send(menu.text, { reply_markup: menu.reply_markup });
       return;
     }
     if (isAdmin && cmd === '/del') {
@@ -211,4 +242,37 @@ export async function handleUpdate(update, deps) {
   } catch (e) {
     console.log('bot error', e && e.message);
   }
+}
+
+async function handleCallback(q, deps) {
+  const { env, hub } = deps;
+  const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
+  const answer = (text) => tg.call('answerCallbackQuery', { callback_query_id: q.id, text: text || '' }).catch(() => null);
+  const fromId = String((q.from && q.from.id) || '');
+  if (!adminIds(env).includes(fromId)) return answer('بس الأدمن يكدر يعدّل الأصوات');
+  const [act, key, pg] = String(q.data || '').split('|');
+  const page = Number(pg) || 0;
+  let note = '';
+  try {
+    if (act === 't') {
+      const r = await hub.toggleSound(key);
+      note = r ? `${r.active ? '✅ رجع' : '🚫 انعطل'}: ${r.title}` : 'ما لگيت هذا الصوت';
+    } else if (act === 'd') {
+      const r = await hub.deleteSound(key);
+      note = r ? `${r.deleted ? '🗑️ انحذف' : '🚫 انعطل'}: ${r.title}` : 'ما لگيت هذا الصوت';
+    } else if (act === 'ba') {
+      await hub.setBuiltinAll(key === '1');
+      note = key === '1' ? '🔊 رجعت أصوات النظام' : '🔇 انعطلت أصوات النظام';
+    }
+    if (q.message) {
+      const menu = await soundsMenu(hub, page);
+      await tg
+        .call('editMessageText', { chat_id: q.message.chat.id, message_id: q.message.message_id, text: menu.text, reply_markup: menu.reply_markup })
+        .catch(() => null);
+    }
+  } catch (e) {
+    note = 'صار خطأ، جرّب مرة ثانية';
+    console.log('callback error', e && e.message);
+  }
+  await answer(note);
 }

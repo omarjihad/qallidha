@@ -53,13 +53,15 @@ export function clearCenter() {
   $('#center').innerHTML = '';
 }
 
-export function scoreBanner(raw, mult = 1, sab = []) {
+/** «X / 100» بالوردي الغامق تحت المايك — مثل الأصلية. */
+export function scoreBanner(raw, mult = 1) {
   const c = $('#center');
   const b = el(
     'div',
     { class: 'banner score' },
-    el('span', { class: 'num' }, String(raw)),
-    el('span', { class: 'slash' }, ' / 100'),
+    el('span', { class: 'num' }, '0'),
+    el('span', { class: 'slash' }, '/'),
+    el('span', { class: 'num' }, '100'),
     mult > 1 ? el('span', { class: 'mult' }, `×${mult}`) : null,
   );
   c.appendChild(b);
@@ -80,21 +82,78 @@ export function scoreBanner(raw, mult = 1, sab = []) {
   return b;
 }
 
+/* ------------------------------------------------------------ «حاول… تقلّدها!» */
+// الحروف تطير وتستقر واحد واحد مثل الأصلية. للعربي نحافظ على اتصال الحروف بـZWJ
+// لأن كل حرف بعنصر مستقل.
+const NO_JOIN_NEXT = new Set([...'اأإآٱدذرزوؤةىءژ']);
+const isArLetter = (ch) => /[ؠ-يٮ-ۓۺ-ۿ]/.test(ch);
+const isMark = (ch) => /[ً-ٰٟۖ-ۭ]/.test(ch);
+
+function letterPieces(word) {
+  const cs = [];
+  for (const ch of word) {
+    if (isMark(ch) && cs.length) cs[cs.length - 1] += ch;
+    else cs.push(ch);
+  }
+  const base = cs.map((c) => [...c][0]);
+  const joinsNext = base.map((b, i) => isArLetter(b) && !NO_JOIN_NEXT.has(b) && i + 1 < base.length && isArLetter(base[i + 1]) && base[i + 1] !== 'ء');
+  return cs.map((c, i) => (i > 0 && joinsNext[i - 1] ? '‍' : '') + c + (joinsNext[i] ? '‍' : ''));
+}
+
+export function reproduceBanner(ms = 1600, lines = ['حاول..', 'تقلّدها!']) {
+  const c = $('#center');
+  c.querySelectorAll('.repro').forEach((x) => x.remove());
+  let k = 0;
+  const frac = (v) => v - Math.floor(v);
+  const box = el(
+    'div',
+    { class: 'banner repro bubble' },
+    lines.map((line) =>
+      el(
+        'div',
+        { class: 'repro-line' },
+        letterPieces(line).map((p) => {
+          const i = k++;
+          // نقطة انطلاق عشوائية ثابتة لكل حرف (من فوق ومن الجوانب)
+          const f = frac(Math.sin(i * 12.9898 + 4.1) * 43758.5453);
+          const g = frac(Math.sin(i * 78.233 + 1.7) * 12543.13);
+          const s = el('span', { class: 'ch' }, p);
+          s.style.setProperty('--x', `${((f - 0.5) * 140).toFixed(0)}%`);
+          s.style.setProperty('--y', `${(-70 - g * 170).toFixed(0)}%`);
+          s.style.setProperty('--r', `${((f - 0.5) * 80).toFixed(0)}deg`);
+          s.style.animationDelay = `${(i * 0.055).toFixed(3)}s`;
+          return s;
+        }),
+      ),
+    ),
+  );
+  c.appendChild(box);
+  if (ms > 0) {
+    setTimeout(() => {
+      box.classList.add('out');
+      setTimeout(() => box.remove(), 320);
+    }, ms);
+  }
+  return box;
+}
+
 /* ------------------------------------------------------------ الكروت */
+const CARD_TILT = [-2, 1.5, -1, 2, 0];
 export function renderCards(players, { me, host, gains = {}, badges = {} } = {}) {
   const wrap = $('#cards');
   const n = players.length;
   const prev = new Map([...wrap.children].map((c) => [c.dataset.uid, c]));
   wrap.innerHTML = '';
   players.forEach((p, i) => {
-    const rot = (i - (n - 1) / 2) * 6;
-    const lift = Math.abs(i - (n - 1) / 2) * 3;
+    const off = i - (n - 1) / 2;
+    const rot = off * 6.5 + CARD_TILT[i % CARD_TILT.length];
+    const lift = Math.abs(off) * 0.9;
     const card = el(
       'div',
       {
         class: 'pcard' + (p.uid === me ? ' me' : '') + (p.on === false ? ' off' : ''),
         'data-uid': p.uid,
-        style: { transform: `translateY(${lift}px) rotate(${rot}deg)`, zIndex: String(10 + i) },
+        style: { transform: `translateY(calc(var(--u) * ${lift.toFixed(2)})) rotate(${rot.toFixed(1)}deg)`, zIndex: String(10 + n - i) },
       },
       el('div', { class: 'pc-face', style: { background: SKINS[p.skin % SKINS.length].card } }, el('img', { src: portrait(p.skin), alt: '' })),
       el('div', { class: 'pc-name' }, p.name),
@@ -111,32 +170,66 @@ export function renderCards(players, { me, host, gains = {}, badges = {} } = {})
 }
 
 /* ------------------------------------------------------------ شريط الموجة */
+// شريط أسود بعرض الشاشة: موجة المثال رمادية بالنص (~ثلث العرض)، المؤشر أحمر، ووقت التسجيل تتلوّن زرقاء.
+// المحور الأفقي = الزمن: المؤشر يبدي قبل الموجة بشوية (مهلة lead) ويكمل بعدها لنهاية نافذة التسجيل.
+const WAVE_W = 0.34;
+const WIN_W = 0.62;
+
+function envelope(peaks) {
+  const n = peaks ? peaks.length : 0;
+  if (!n) return new Float32Array(160).fill(0.5);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = (peaks[Math.max(0, i - 1)] + 2 * peaks[i] + peaks[Math.min(n - 1, i + 1)]) / 4;
+    out[i] = 0.16 + 0.84 * Math.sqrt(Math.max(0, a));
+  }
+  // أطراف مدوّرة مثل الأصلية
+  const tap = Math.max(2, Math.round(n * 0.045));
+  for (let i = 0; i < tap; i++) {
+    const k = Math.sin(((i + 0.5) / tap) * (Math.PI / 2));
+    out[i] *= k;
+    out[n - 1 - i] *= k;
+  }
+  return out;
+}
+
 export class WaveBar {
   constructor(root) {
     this.root = root;
     this.canvas = root.querySelector('canvas');
     this.g = this.canvas.getContext('2d');
     this.ref = null;
-    this.take = new Float32Array(200);
-    this.takeTo = 0;
-    this.progress = -1;
+    this.dur = 2;
+    this.win = 2.9;
+    this.lead = 0.25;
+    this.time = -1; // موقع المؤشر بالثواني داخل النافذة (-1 = مخفي)
+    this.fillTo = -1; // لحد وين تتلوّن الموجة زرقاء (ثواني)
+    this._mode = 'hidden';
     this.mode = 'hidden';
+  }
+  get mode() {
+    return this._mode;
+  }
+  set mode(m) {
+    this._mode = m;
+    this.root.dataset.mode = m;
+    if (this.root.parentElement) this.root.parentElement.dataset.mode = m;
   }
   show(on) {
     this.root.classList.toggle('show', on);
     if (!on) this.mode = 'hidden';
   }
-  setRef(peaks) {
-    this.ref = peaks;
-    this.take = new Float32Array(peaks ? peaks.length : 200);
-    this.takeTo = 0;
-    this.progress = -1;
+  setRef(peaks, dur = 2, win = dur + 0.9, lead = 0.25) {
+    this.ref = envelope(peaks);
+    this.dur = Math.max(0.2, dur);
+    this.lead = lead;
+    this.win = Math.max(this.lead + 0.3, win);
+    this.time = -1;
+    this.fillTo = -1;
   }
-  pushTake(frac, level) {
-    const n = this.take.length;
-    const k = Math.min(n - 1, Math.max(0, Math.floor(frac * n)));
-    for (let i = this.takeTo; i <= k; i++) this.take[i] = Math.max(this.take[i], Math.min(1, level));
-    this.takeTo = Math.max(this.takeTo, k);
+  /** نهاية موجة المثال داخل النافذة (ثواني) */
+  get refEnd() {
+    return Math.min(this.win, this.lead + this.dur);
   }
   draw() {
     const c = this.canvas;
@@ -150,45 +243,67 @@ export class WaveBar {
     const g = this.g;
     g.clearRect(0, 0, w, h);
     if (!this.ref) return;
+    const len = this.refEnd - this.lead;
+    const pps = Math.min(WAVE_W / Math.max(0.05, len), WIN_W / this.win) * w; // بكسل لكل ثانية
+    const a = w / 2 - (len * pps) / 2;
+    const xT = (t) => a + (t - this.lead) * pps;
+    const b = xT(this.refEnd);
     const n = this.ref.length;
-    const pad = h * 0.1;
     const mid = h / 2;
-    const amp = (h / 2 - pad) * 0.95;
-    const xAt = (i) => pad * 2 + ((w - pad * 4) * i) / (n - 1);
-    const shape = (arr, upto, color) => {
+    const amp = h * 0.4;
+    const path = () => {
       g.beginPath();
-      g.moveTo(xAt(0), mid);
-      for (let i = 0; i <= upto; i++) g.lineTo(xAt(i), mid - Math.max(0.04, arr[i]) * amp);
-      for (let i = upto; i >= 0; i--) g.lineTo(xAt(i), mid + Math.max(0.04, arr[i]) * amp);
+      for (let i = 0; i < n; i++) {
+        const x = a + ((b - a) * i) / (n - 1);
+        const y = mid - this.ref[i] * amp;
+        if (i) g.lineTo(x, y);
+        else g.moveTo(x, y);
+      }
+      for (let i = n - 1; i >= 0; i--) g.lineTo(a + ((b - a) * i) / (n - 1), mid + this.ref[i] * amp);
       g.closePath();
-      g.fillStyle = color;
-      g.fill();
     };
-    shape(this.ref, n - 1, '#b9b3c9');
-    if (this.mode === 'record' && this.takeTo > 0) shape(this.take, this.takeTo, '#33b9ff');
-    if (this.progress >= 0) {
-      const x = xAt(Math.min(n - 1, this.progress * (n - 1)));
-      g.fillStyle = '#ff2d2d';
-      g.fillRect(x - dpr * 1.5, pad * 0.4, dpr * 3, h - pad * 0.8);
+    path();
+    g.fillStyle = '#958ea9';
+    g.fill();
+    g.lineWidth = Math.max(1, dpr * 1.2);
+    g.strokeStyle = 'rgba(214,208,232,0.55)';
+    g.stroke();
+    if (this.fillTo > 0) {
+      g.save();
+      g.beginPath();
+      g.rect(0, 0, Math.min(w, xT(this.fillTo)), h);
+      g.clip();
+      path();
+      g.fillStyle = '#35befd';
+      g.fill();
+      g.restore();
+    }
+    if (this.time >= 0) {
+      const x = Math.min(w - dpr * 4, xT(Math.min(this.win, this.time)));
+      g.fillStyle = '#e8141e';
+      g.fillRect(Math.round(x - dpr * 2.2), Math.round(h * 0.03), Math.round(dpr * 4.4), Math.round(h * 0.94));
     }
   }
 }
 
-/* ------------------------------------------------------------ بطاقة الميم */
+/* ------------------------------------------------------------ خلفية المثال (فيديو/صورة) */
+// الأصوات اللي إلها فيديو أو صورة تنعرض خلفية معتّمة ورا «حاول تقلّدها»؛ الأصوات العادية بلا خلفية مثل الأصلية.
 export function showMeme(sound, entry) {
   const m = $('#meme');
   m.innerHTML = '';
-  m.className = 'show';
-  let media;
+  let media = null;
   if (entry && entry.videoUrl) {
     media = el('video', { src: entry.videoUrl, muted: true, playsinline: true, 'webkit-playsinline': true, preload: 'auto' });
     media.muted = true;
-  } else if (sound.img) {
+  } else if (sound && sound.img) {
     media = el('img', { src: sound.img, alt: '' });
-  } else {
-    media = el('div', { class: 'meme-emoji', style: { background: `radial-gradient(circle at 50% 40%, #fff6, transparent 60%), ${sound.color || '#ff4f8b'}` } }, sound.emoji || '🎤');
   }
-  m.appendChild(el('div', { class: 'meme-card' }, media, el('div', { class: 'meme-title' }, sound.title || '')));
+  if (!media) {
+    m.className = '';
+    return null;
+  }
+  m.appendChild(media);
+  m.className = 'show';
   return media;
 }
 
@@ -239,20 +354,47 @@ export function confirmDialog(text, yes = 'إي', no = 'لا') {
   });
 }
 
-/** لوحة أرقام للدخول بكود (بدون كيبورد النظام لأن الشاشة مُدارة). */
+/**
+ * لوحة أرقام للدخول بكود (بدون كيبورد النظام لأن الشاشة مُدارة).
+ * onSubmit(code) ترجع true للنجاح، أو نص خطأ يظهر تحت الأرقام.
+ */
 export function keypad(onSubmit, onClose) {
   let code = '';
+  let busy = false;
   const disp = el('div', { class: 'kp-display' });
+  const hint = el('div', { class: 'hint kp-hint' }, 'الكود 5 أرقام — تلگاه عند صاحب الغرفة');
   const render = () => {
     disp.innerHTML = '';
     for (let i = 0; i < 5; i++) disp.appendChild(el('span', { class: 'kp-digit' + (code[i] ? ' on' : '') }, code[i] || ''));
   };
   render();
+  const submit = async () => {
+    if (busy || code.length !== 5) return;
+    busy = true;
+    hint.textContent = 'جاري البحث عن الغرفة…';
+    hint.classList.remove('err');
+    let res;
+    try {
+      res = await onSubmit(code);
+    } catch (e) {
+      res = (e && e.message) || 'صار خطأ بالاتصال';
+    }
+    busy = false;
+    if (res === true) return;
+    hint.textContent = typeof res === 'string' ? res : 'ماكو غرفة بهالكود';
+    hint.classList.add('err');
+    disp.classList.remove('shake');
+    void disp.offsetWidth;
+    disp.classList.add('shake');
+    code = '';
+    render();
+  };
   const press = (d) => {
+    if (busy) return;
     if (d === 'del') code = code.slice(0, -1);
     else if (code.length < 5) code += d;
     render();
-    if (code.length === 5) setTimeout(() => onSubmit(code), 120);
+    if (code.length === 5) setTimeout(submit, 120);
   };
   const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'del', '0', 'ok'];
   const pad = el(
@@ -263,7 +405,7 @@ export function keypad(onSubmit, onClose) {
         'button',
         {
           class: 'kp-key' + (k === 'ok' ? ' ok' : k === 'del' ? ' del' : ''),
-          onclick: () => (k === 'ok' ? code.length === 5 && onSubmit(code) : press(k)),
+          onclick: () => (k === 'ok' ? submit() : press(k)),
         },
         k === 'del' ? '⌫' : k === 'ok' ? '✓' : k,
       ),
@@ -273,7 +415,7 @@ export function keypad(onSubmit, onClose) {
     'div',
     { class: 'panel keypad' },
     el('button', { class: 'xbtn', onclick: onClose }, '✕'),
-    el('div', { class: 'kp-side' }, el('div', { class: 'panel-title' }, 'ادخل كود الغرفة'), disp, el('div', { class: 'hint' }, 'الكود 5 أرقام — تلگاه عند صاحب الغرفة')),
+    el('div', { class: 'kp-side' }, el('div', { class: 'panel-title' }, 'ادخل كود الغرفة'), disp, hint),
     pad,
   );
 }

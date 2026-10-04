@@ -22,7 +22,23 @@ async function update(message) {
   });
   return r.status;
 }
+async function callback(from, data, messageId = 777) {
+  const r = await fetch(BASE + '/api/telegram/webhook', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': secret },
+    body: JSON.stringify({
+      update_id: ++uid,
+      callback_query: { id: 'cb' + uid, from, data, message: { message_id: messageId, chat: { id: from.id, type: 'private' }, date: 0 } },
+    }),
+  });
+  return r.status;
+}
 const calls = async () => (await fetch(MOCK + '/__calls')).json();
+const lastCall = async (method) => {
+  const c = (await calls()).filter((x) => x.method === method);
+  return c[c.length - 1] && c[c.length - 1].payload;
+};
+const health = async () => (await fetch(BASE + '/api/health')).json();
 const lastSend = async () => {
   const c = (await calls()).filter((x) => x.method === 'sendMessage');
   return c[c.length - 1] && c[c.length - 1].payload;
@@ -61,7 +77,39 @@ check(m && m.text.includes('انضافت الصورة'), 'صورة للصوت');
 await update({ from: admin, chat: pchat(admin), text: '/sounds' });
 await wait(300);
 m = await lastSend();
-check(m && m.text.includes('#1') && m.text.includes('🖼️'), '/sounds يعرض الصوت مع الصورة');
+const kb = (m && m.reply_markup && m.reply_markup.inline_keyboard) || [];
+check(
+  m && kb[0] && kb[0][0].text.includes('✅') && kb[0][0].text.includes('🖼️') && kb[0][0].callback_data === 't|c:1|0' && kb[0][1].callback_data === 'd|c:1|0',
+  '/sounds: قائمة بأزرار (صوتك أول مع الصورة + زر حذف)',
+);
+check(kb.some((row) => row[0] && /^ba\|0\|/.test(row[0].callback_data)), '/sounds: زر تعطيل كل أصوات النظام');
+const builtinKey = kb.map((row) => row[0].callback_data.split('|')[1]).find((k) => k.startsWith('b:'));
+
+// تعطيل صوت نظام واحد بالزر
+let h0 = await health();
+await callback(admin, `t|${builtinKey}|0`);
+await wait(400);
+let h1 = await health();
+let edit = await lastCall('editMessageText');
+let ans = await lastCall('answerCallbackQuery');
+check(h1.builtinOn === h0.builtinOn - 1 && edit && edit.message_id === 777 && ans && ans.text.includes('انعطل'), `زر يعطّل صوت نظام (${h0.builtinOn}→${h1.builtinOn}) ويحدّث الرسالة`);
+await callback(admin, `t|${builtinKey}|0`);
+await wait(400);
+check((await health()).builtinOn === h0.builtinOn, 'نفس الزر يرجّعه');
+
+// غير الأدمن ما يكدر
+await callback(user, `ba|0|0`);
+await wait(300);
+ans = await lastCall('answerCallbackQuery');
+check(ans && ans.text.includes('بس الأدمن') && (await health()).builtinOn === h0.builtinOn, 'غير الأدمن ما يكدر يعدّل الأصوات');
+
+// تعطيل كل أصوات النظام ثم إرجاعها
+await callback(admin, 'ba|0|0');
+await wait(400);
+check((await health()).builtinOn === 0, 'زر يعطّل كل أصوات النظام');
+await callback(admin, 'ba|1|0');
+await wait(400);
+check((await health()).builtinOn === h0.builtinOn, 'زر يرجّع كل أصوات النظام');
 
 await update({ from: user, chat: pchat(user), voice: { file_id: 'FILEID_voice_x', duration: 2 } });
 await wait(300);
@@ -135,10 +183,37 @@ const wsBad = await new Promise((resolve) => {
 });
 check(wsBad === 'rejected', 'WebSocket بهوية مزوّرة مرفوض');
 
-await update({ from: admin, chat: pchat(admin), text: '/del 1' });
+// الدخول بكود غرفة غير موجودة: لا تنخلق غرفة
+r = await fetch(BASE + '/api/rooms/99999');
+j = await r.json();
+check(r.status === 200 && j.exists === false, 'GET /api/rooms/99999 → غير موجودة');
+r = await fetch(BASE + `/api/rooms/${code}`);
+j = await r.json();
+check(j.exists === true && j.phase === 'lobby', 'GET /api/rooms/<كود موجود> → موجودة بغرفة الانتظار');
+const nf = await new Promise((resolve) => {
+  const ws = new WebSocket(BASE.replace('http', 'ws') + `/ws/99998?a=${encodeURIComponent(good)}`);
+  let err = null;
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.t === 'error') err = msg.code;
+    if (msg.t === 'state') resolve('state');
+  };
+  ws.onclose = () => resolve(err || 'closed');
+  ws.onerror = () => resolve(err || 'error');
+  setTimeout(() => resolve(err || 'timeout'), 5000);
+});
+r = await fetch(BASE + '/api/rooms/99998');
+j = await r.json();
+check(nf === 'notfound' && j.exists === false, `WebSocket لغرفة غير موجودة → notfound (${nf}) وما تنخلق`);
+
+// حذف صوتك نهائيًا بالزر
+await callback(admin, 'd|c:1|0');
+await wait(400);
+ans = await lastCall('answerCallbackQuery');
+await update({ from: admin, chat: pchat(admin), text: '/sounds' });
 await wait(300);
 m = await lastSend();
-check(m && m.text.includes('انحذف'), '/del');
+check(ans && ans.text.includes('انحذف') && !m.reply_markup.inline_keyboard.some((row) => row[0].callback_data === 't|c:1|0'), 'زر 🗑️ يحذف صوتك نهائيًا');
 
 console.log(`\n${ok} نجح، ${bad} فشل`);
 process.exit(bad ? 1 : 0);

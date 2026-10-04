@@ -74,7 +74,7 @@ const state = (page) =>
 let shotN = 0;
 async function shot(page, name) {
   shotN++;
-  const file = `${out}/${String(shotN).padStart(2, '0')}-${name}`;
+  const file = /^\d\d-/.test(name) ? `${out}/${name}` : `${out}/${String(shotN).padStart(2, '0')}-${name}`;
   await page.screenshot({ path: file + '-raw.png' });
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', file + '-raw.png', '-vf', 'transpose=2,scale=844:-1', file + '.png']);
 }
@@ -84,16 +84,35 @@ for (let i = 0; i < 3; i++) pages.push(await newPlayer(i));
 const [host, ...guests] = pages;
 await host.goto(BASE + '/');
 await host.waitForTimeout(1500);
+await shot(host, 'menu');
+
+// كود غرفة غير موجود: لازم يطلع «ماكو غرفة» وما تنخلق غرفة
+await host.evaluate(() => [...document.querySelectorAll('.menu-btns .btn')].find((b) => b.textContent.includes('بكود'))?.click());
+await host.waitForSelector('.kp-key');
+for (const d of '99999') await host.evaluate((k) => [...document.querySelectorAll('.kp-key')].find((b) => b.textContent === k)?.click(), d);
+await host.waitForSelector('.kp-hint.err', { timeout: 8000 });
+const kpMsg = await host.$eval('.kp-hint', (e) => e.textContent);
+const stillMenu = await host.evaluate(() => document.documentElement.dataset.screen !== 'room');
+console.log('join unknown code →', JSON.stringify(kpMsg), stillMenu ? '(stayed on menu ✅)' : '(entered a room ❌)');
+if (!/ماكو غرفة/.test(kpMsg) || !stillMenu) errors.push('unknown room code was not rejected');
+await shot(host, 'join-notfound');
+await host.evaluate(() => document.querySelector('.keypad .xbtn')?.click());
+await host.waitForTimeout(500);
+
 await tap(host, '.menu-btns .btn.pink');
 await host.waitForSelector('.room-code b');
 const code = await host.$eval('.room-code b', (e) => e.textContent);
 for (const g of guests) await g.goto(BASE + '/?room=' + code);
 await host.waitForTimeout(2500);
 for (const p of pages) await p.evaluate(() => document.querySelector('#lobbyBar .btn.orange')?.click());
-await host.waitForTimeout(800);
+await host.waitForTimeout(1200);
+await shot(host, 'lobby');
 await tap(host, '#lobbyBar .btn.pink');
+const audible = [];
+const later = [];
 
 const seen = new Set();
+const s_final_needed = () => !seen.has('final-reached');
 const t0 = Date.now();
 const summary = [];
 while (Date.now() - t0 < 300000) {
@@ -113,11 +132,16 @@ while (Date.now() - t0 < 300000) {
         pages[1].evaluate((u) => window.__fakeMicPlay(u, 1.12), s.sound.url).catch((e) => log('play err', e.message));
       }, Math.max(0, delay));
       if (s.round === 1) {
-        await host.waitForTimeout(Math.max(0, s.t.listenAt + 250 - s.now));
-        await shot(host, 'listen');
-        const s2 = await state(host);
-        await host.waitForTimeout(Math.max(0, s.t.recAt + 1200 - s2.now));
-        await shot(host, 'record');
+        // كل لقطة من صفحة مختلفة بالتوازي حتى ما يتأخر التوقيت (الرسم بالمحاكاة بطيء)
+        const at = async (page, ts, name) => {
+          const s2 = await state(page);
+          await page.waitForTimeout(Math.max(0, ts - s2.now));
+          await shot(page, name);
+        };
+        later.push(at(pages[2], s.t.listenAt - 350, '20-letters'));
+        later.push(at(pages[1], s.t.listenAt + Math.min(600, s.t.dur * 500), '21-listen'));
+        later.push(at(pages[2], s.t.countAt + 2 * 750 + 250, '22-count1'));
+        later.push(at(pages[0], s.t.recAt + 700, '23-record'));
       }
     }
     if (s.phase === 'playback') {
@@ -137,19 +161,38 @@ while (Date.now() - t0 < 300000) {
         fs.writeFileSync(`${out}/round-${s.round}.json`, JSON.stringify({ sound: s.sound, players: s.players, t: s.t }));
       }
       log('results', JSON.stringify(row));
+      const play = await host.evaluate(() => window.__qd.game.st.play);
+      const first = play.find((x) => !x.none) || play[0];
       if (s.round === 1) {
-        const play = await host.evaluate(() => window.__qd.game.st.play);
-        const first = play[0];
-        await host.waitForTimeout(Math.max(0, first.at + first.walk + 500 - s.now));
-        await shot(host, 'playback-sing');
+        const at = async (page, ts, name) => {
+          const s2 = await state(page);
+          await page.waitForTimeout(Math.max(0, ts - s2.now));
+          await shot(page, name);
+        };
+        later.push(at(pages[1], first.at + 400, '30-walk'));
+        later.push(at(pages[2], first.at + first.walk + Math.min(first.dur, 1500) * 0.5, '31-sing'));
+        later.push(at(pages[1], first.at + first.walk + first.dur + 650, '32-score'));
+      }
+      {
+        const s3 = await state(host);
+        await host.waitForTimeout(Math.max(0, first.at + first.walk + first.dur + 200 - s3.now));
+        const lp = await host.evaluate(() => {
+          const g = window.__qd.game;
+          return g.lastPlayback ? { uid: g.lastPlayback.uid, max: g.lastPlayback.max } : null;
+        });
+        audible.push({ round: s.round, ...lp });
+        log('playback level', JSON.stringify(lp));
       }
     }
     if (s.phase === 'wheel') {
-      await host.waitForTimeout(400);
+      await host.waitForTimeout(700);
       if (s.round === 1) await shot(host, 'wheel');
-      for (const p of pages) await p.evaluate(() => document.querySelector('.spin-btn')?.click());
-      await host.waitForTimeout(4800);
+      for (const p of pages) await p.evaluate(() => document.querySelector('.wheel-holder.tappable')?.click());
+      await host.waitForTimeout(1500);
+      if (s.round === 1) await shot(host, 'wheel-spin');
+      await host.waitForTimeout(3300);
       if (s.round === 1) await shot(host, 'wheel-result');
+      await host.waitForTimeout(1500);
       for (const p of pages) {
         const hit = await p.$('.phit.on');
         if (hit) {
@@ -161,10 +204,29 @@ while (Date.now() - t0 < 300000) {
         }
       }
     }
-    if (s.phase === 'final') break;
+    if (s.round === 1 && (s.phase === 'intro' || s.phase === 'analyze')) {
+      await host.waitForTimeout(500);
+      await shot(host, s.phase);
+    }
+    if (s.phase === 'final') {
+      seen.add('final-reached');
+      await host.waitForTimeout(1500);
+      await shot(host, 'final');
+      break;
+    }
     if (s.round > ROUNDS_TO_CHECK) break;
   }
   await host.waitForTimeout(100);
+}
+await Promise.all(later);
+if (s_final_needed()) {
+  // (CHECK أقل من 4: ما وصلنا للنهاية)
+  console.log('stopped early at round', ROUNDS_TO_CHECK);
+  console.table(summary);
+  console.log('playback audible:', JSON.stringify(audible));
+  console.log('errors:', errors.length ? errors.join('\n') : '(none)');
+  await browser.close();
+  process.exit(0);
 }
 // رجوع للقائمة ثم غرفة جديدة: لازم ما يبقى أثر من اللعبة السابقة
 await host.waitForTimeout(1500);
@@ -184,5 +246,8 @@ const clean = await host.evaluate(() => ({
 console.log('menu after final:', menuOk, 'new room state:', JSON.stringify(clean));
 await shot(host, 'new-room');
 console.table(summary);
+console.log('playback audible:', JSON.stringify(audible));
+const silentPlays = audible.filter((a) => !(a.max > 0.05));
+if (silentPlays.length) errors.push('silent playback: ' + JSON.stringify(silentPlays));
 console.log('errors:', errors.length ? errors.join('\n') : '(none)');
 await browser.close();

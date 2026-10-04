@@ -33,9 +33,28 @@ window.addEventListener('resize', () => setTimeout(layout, 50));
 // أي لمسة تفتح الصوت (سياسات التشغيل التلقائي)
 window.addEventListener('pointerdown', () => audio.unlock(), { capture: true });
 
-// أزرار التفاعل
+// أزرار التفاعل: زر صغير يفتح قائمة الوجوه
 const reacts = $('#reacts');
-for (const e of REACTIONS) reacts.appendChild(el('button', { class: 'react-btn', onclick: () => game && game.sendReaction(e) }, e));
+reacts.appendChild(el('button', { class: 'react-toggle', 'aria-label': 'تفاعل', onclick: () => reacts.classList.toggle('open') }, '😀'));
+reacts.appendChild(
+  el(
+    'div',
+    { class: 'react-list' },
+    REACTIONS.map((e) =>
+      el(
+        'button',
+        {
+          class: 'react-btn',
+          onclick: () => {
+            if (game) game.sendReaction(e);
+            reacts.classList.remove('open');
+          },
+        },
+        e,
+      ),
+    ),
+  ),
+);
 
 $('#exitBtn').addEventListener('click', () => game && game.askLeave());
 
@@ -60,6 +79,7 @@ function demoStage() {
 
 function showMenu() {
   document.documentElement.dataset.screen = 'menu';
+  stage.setShot('menu');
   demoStage();
   const s = (profile && profile.stats) || {};
   const name = (profile && profile.user && profile.user.name) || localName();
@@ -108,9 +128,23 @@ function joinByCode() {
   haptic('light');
   ui.overlay(
     ui.keypad(
-      (code) => {
+      async (code) => {
         audio.unlock();
+        const info = await api('/api/rooms/' + code);
+        if (!info.exists) {
+          haptic('error');
+          return 'ماكو غرفة بهالكود 🤷 تأكد من الرقم';
+        }
+        if (info.phase !== 'lobby' && info.phase !== 'final') {
+          haptic('error');
+          return 'اللعبة بدأت بهاي الغرفة — انتظر تخلص';
+        }
+        if (info.players >= (info.max || 5)) {
+          haptic('error');
+          return 'الغرفة مليانة';
+        }
         enterRoom(code, false);
+        return true;
       },
       () => showMenu(),
     ),
