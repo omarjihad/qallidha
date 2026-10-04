@@ -55,9 +55,21 @@ const lines = (...l) => l.map((s) => (s ? RLM + s : '')).join('\n');
 
 const PER_PAGE = 10;
 
+/** سطور عدد الأصوات (للأدمن ولغيره) */
+export function countLines(c) {
+  const lib = c.library;
+  const libExtra = [lib.pending ? `⏳ ${lib.pending} بعدها تنزل` : '', lib.failed ? `❌ ${lib.failed} ما نزلت` : ''].filter(Boolean).join('، ');
+  return [
+    `✅ الأصوات الفعّالة باللعبة: ${c.active}`,
+    `🎌 مكتبة الميمز: ${lib.on} من ${lib.ready}${libExtra ? ` (${libExtra})` : ''}`,
+    `🎵 أصوات النظام: ${c.builtin.on} من ${c.builtin.total}`,
+    `🎙️ أصواتك المضافة: ${c.custom.on} من ${c.custom.total}`,
+  ];
+}
+
 /** قائمة الأصوات للأدمن: كل صوت زر يفعّل/يعطّل، و🗑️ يحذف أصواتك نهائيًا. */
 export async function soundsMenu(hub, page = 0) {
-  const all = await hub.listAll();
+  const [all, counts] = await Promise.all([hub.listAll(), hub.soundCounts()]);
   const pages = Math.max(1, Math.ceil(all.length / PER_PAGE));
   page = Math.max(0, Math.min(pages - 1, page | 0));
   const rows = all.slice(page * PER_PAGE, page * PER_PAGE + PER_PAGE).map((x) => {
@@ -65,8 +77,9 @@ export async function soundsMenu(hub, page = 0) {
     row.push({ text: '🗑️', callback_data: `d|${x.key}|${page}` });
     return row;
   });
-  const builtinOn = all.some((x) => x.kind === 'builtin' && x.active);
-  rows.push([{ text: builtinOn ? '🔇 عطّل كل أصوات النظام' : '🔊 رجّع كل أصوات النظام', callback_data: `ba|${builtinOn ? 0 : 1}|${page}` }]);
+  const builtinOn = all.some((x) => (x.kind === 'builtin' || x.kind === 'library') && x.active);
+  rows.push([{ text: builtinOn ? '🔇 عطّل كل أصوات النظام والمكتبة' : '🔊 رجّع كل أصوات النظام والمكتبة', callback_data: `ba|${builtinOn ? 0 : 1}|${page}` }]);
+  if (counts.library.failed) rows.push([{ text: `🔄 أعد تحميل الأصوات اللي ما نزلت (${counts.library.failed})`, callback_data: `lr||${page}` }]);
   if (pages > 1) {
     const nav = [];
     if (page > 0) nav.push({ text: '→ السابق', callback_data: `p||${page - 1}` });
@@ -74,12 +87,12 @@ export async function soundsMenu(hub, page = 0) {
     if (page < pages - 1) nav.push({ text: 'التالي ←', callback_data: `p||${page + 1}` });
     rows.push(nav);
   }
-  const on = all.filter((x) => x.active).length;
+  const on = counts.active;
   const text = lines(
-    `🎵 الأصوات: ${on} شغّالة من ${all.length}`,
+    ...countLines(counts),
     '',
     'اضغط على الصوت حتى تعطّله 🚫 أو ترجّعه ✅',
-    '🗑️ = يطلع من اللعبة (أصواتك تنحذف نهائيًا، وأصوات النظام تنعطل)',
+    '🗑️ = يطلع من اللعبة (أصواتك تنحذف نهائيًا، والباقي ينعطل)',
     on === 0 ? '⚠️ ماكو ولا صوت شغّال — اللعبة ما تبدي' : on < 4 ? `⚠️ ${on} أصوات بس = ${on} جولات` : '',
   );
   return { text, reply_markup: { inline_keyboard: rows } };
@@ -180,9 +193,9 @@ export async function handleUpdate(update, deps) {
     }
 
     if (cmd === '/help') {
-      const base = ['/play — سوّي غرفة لعب', '/top — المتصدرين', '/id — الآيدي مالتك'];
+      const base = ['/play — سوّي غرفة لعب', '/top — المتصدرين', '/sounds — كم صوت شغّال باللعبة', '/id — الآيدي مالتك'];
       const adm = isAdmin
-        ? ['', 'أوامر الأدمن:', 'دز صوت / فويس / فيديو = ينضاف للعبة (الكابشن = اسمه)', '/sounds — كل الأصوات (تعطيل وحذف بالأزرار)', '/title رقم اسم — تغيير الاسم']
+        ? ['', 'أوامر الأدمن:', 'دز صوت / فويس / فيديو = ينضاف للعبة (الكابشن = اسمه)', '/sounds — عدد الأصوات وكل الأصوات بأزرار (تعطيل وحذف)', '/title رقم اسم — تغيير الاسم']
         : [];
       await send(lines(...base, ...adm));
       return;
@@ -192,6 +205,11 @@ export async function handleUpdate(update, deps) {
     if (isAdmin && cmd === '/sounds') {
       const menu = await soundsMenu(hub, 0);
       await send(menu.text, { reply_markup: menu.reply_markup });
+      return;
+    }
+    if (cmd === '/sounds') {
+      const c = await hub.soundCounts();
+      await send(lines(`🎵 الأصوات الفعّالة باللعبة: ${c.active}`));
       return;
     }
     if (isAdmin && cmd === '/del') {
@@ -262,7 +280,10 @@ async function handleCallback(q, deps) {
       note = r ? `${r.deleted ? '🗑️ انحذف' : '🚫 انعطل'}: ${r.title}` : 'ما لگيت هذا الصوت';
     } else if (act === 'ba') {
       await hub.setBuiltinAll(key === '1');
-      note = key === '1' ? '🔊 رجعت أصوات النظام' : '🔇 انعطلت أصوات النظام';
+      note = key === '1' ? '🔊 رجعت أصوات النظام والمكتبة' : '🔇 انعطلت أصوات النظام والمكتبة';
+    } else if (act === 'lr') {
+      await hub.retryLibrary();
+      note = '🔄 جاري التحميل… راح أبلغك من يخلص';
     }
     if (q.message) {
       const menu = await soundsMenu(hub, page);

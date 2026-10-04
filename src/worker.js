@@ -5,6 +5,7 @@ import { Hub } from './hub.js';
 import { identify, AuthError, webhookSecret } from './auth.js';
 import { handleUpdate, Tg } from './telegram.js';
 import { VERSION } from '../public/js/shared.js';
+import { LIBRARY_BY_SLUG } from './library-sounds.js';
 
 export { Room, Hub };
 
@@ -31,19 +32,39 @@ function publicOrigin(env, url) {
   return fromEnv || url.origin;
 }
 
-/** تسجيل/تحديث الـwebhook كسولًا بعد أي نشر (يتجاهل إذا نفس الإعدادات). */
+/**
+ * بعد أي نشر (أول طلب يوصل): نحدّث إعدادات الـwebhook، ونبدي تنزيل أصوات المكتبة الناقصة.
+ * الاثنين يتجاهلون إذا ماكو شي جديد.
+ */
 function checkWebhook(env, ctx, origin) {
-  if (!(env.TELEGRAM_BOT_TOKEN || '').trim()) return;
   if (webhookOkAt || Date.now() - webhookTryAt < 60000) return;
   webhookTryAt = Date.now();
+  const hub = hubOf(env);
   ctx.waitUntil(
-    hubOf(env)
-      .ensureWebhook(origin)
-      .then((r) => {
-        if (r && r.ok) webhookOkAt = Date.now();
-      })
-      .catch(() => null),
+    (async () => {
+      const lib = await hub.ensureLibrary().catch(() => null);
+      if (!(env.TELEGRAM_BOT_TOKEN || '').trim()) {
+        if (lib) webhookOkAt = Date.now();
+        return;
+      }
+      const r = await hub.ensureWebhook(origin).catch(() => null);
+      if (r && r.ok && lib) webhookOkAt = Date.now();
+    })(),
   );
+}
+
+/** ملف صوت من مكتبة الميمز (محفوظ بالـHub بعد ما نزل) */
+async function libFile(env, slug) {
+  if (!LIBRARY_BY_SLUG.has(slug)) return new Response('not found', { status: 404 });
+  const f = await hubOf(env).libFile(slug);
+  if (!f) return new Response('not ready', { status: 404, headers: { 'cache-control': 'no-store' } });
+  return new Response(f.data, {
+    headers: {
+      'content-type': f.mime || 'audio/mpeg',
+      'content-length': String(f.data.byteLength),
+      'cache-control': 'public, max-age=31536000, immutable',
+    },
+  });
 }
 
 async function claimRoom(env, chatId = null) {
@@ -234,6 +255,13 @@ export default {
       if (path.startsWith('/api/')) return await api(request, env, ctx, url);
       if (path.startsWith('/ws/')) return await websocket(request, env, url);
       if (path.startsWith('/tgfile/')) return await tgFile(request, env, decodeURIComponent(path.slice(8)));
+      {
+        const lm = /^\/lib\/([a-z0-9-]{1,120})\.mp3$/.exec(path);
+        if (lm) {
+          checkWebhook(env, ctx, publicOrigin(env, url));
+          return await libFile(env, lm[1]);
+        }
+      }
     } catch (e) {
       if (e instanceof AuthError) return json({ error: 'auth', message: e.message }, 401);
       console.log('error', path, e && e.stack);

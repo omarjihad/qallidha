@@ -54,6 +54,24 @@ const group = { id: -100123, type: 'supergroup', title: 'OPBR' };
 const forb = await fetch(BASE + '/api/telegram/webhook', { method: 'POST', body: '{}' });
 check(forb.status === 403, 'webhook يرفض بدون secret');
 
+// مكتبة الميمز: تنزل لوحدها بعد أول طلب (من myinstants الوهمي)، وصوت «bruh» صفحته مكسورة
+let lib = null;
+for (let i = 0; i < 120; i++) {
+  lib = (await health()).library;
+  if (lib && !lib.running && lib.pending === 0) break;
+  await wait(500);
+}
+check(lib && lib.ready === lib.total - 1 && lib.failed === 1 && lib.on === lib.ready, `مكتبة الميمز نزلت لوحدها (${lib && lib.ready}/${lib && lib.total}، فشل ${lib && lib.failed})`);
+await wait(300);
+const libMsg = (await calls()).filter((x) => x.method === 'sendMessage' && x.payload.chat_id === '42' && x.payload.text.includes('مكتبة الميمز')).pop();
+check(libMsg && libMsg.payload.text.includes(`انضاف للعبة ${lib.ready} صوت`) && libMsg.payload.text.includes('ما نزلت (1)'), 'الأدمن توصله رسالة بعدد الأصوات اللي انضافت واللي فشلت');
+let lf = await fetch(BASE + '/lib/omae-wa-mou-shindeiru-nani-494.mp3');
+const lfb = new Uint8Array(await lf.arrayBuffer());
+check(lf.status === 200 && lf.headers.get('content-type') === 'audio/mpeg' && lfb.length > 1000 && /immutable/.test(lf.headers.get('cache-control') || ''), `/lib يخدم صوت المكتبة (${lfb.length} bytes)`);
+lf = await fetch(BASE + '/lib/bruh.mp3');
+const lf2 = await fetch(BASE + '/lib/not-in-the-list.mp3');
+check(lf.status === 404 && lf2.status === 404, '/lib: الصوت اللي فشل أو مو بالقائمة = 404');
+
 await update({ from: admin, chat: pchat(admin), text: '/start' });
 await wait(400);
 let m = await lastSend();
@@ -83,33 +101,53 @@ check(
   '/sounds: قائمة بأزرار (صوتك أول مع الصورة + زر حذف)',
 );
 check(kb.some((row) => row[0] && /^ba\|0\|/.test(row[0].callback_data)), '/sounds: زر تعطيل كل أصوات النظام');
-const builtinKey = kb.map((row) => row[0].callback_data.split('|')[1]).find((k) => k.startsWith('b:'));
-
-// تعطيل صوت نظام واحد بالزر
+const builtinKey = kb.map((row) => row[0].callback_data.split('|')[1]).find((k) => k.startsWith('m:') || k.startsWith('b:'));
 let h0 = await health();
+check(m.text.includes(`✅ الأصوات الفعّالة باللعبة: ${h0.soundsActive}`) && h0.soundsActive === h0.builtinOn + h0.library.on + h0.sounds, `/sounds يكول كم صوت فعّال (${h0.soundsActive})`);
+check(kb.some((row) => row[0] && row[0].callback_data === 'lr||0'), '/sounds: زر «أعد تحميل» للأصوات اللي ما نزلت');
+
+// تعطيل صوت واحد بالزر
 await callback(admin, `t|${builtinKey}|0`);
 await wait(400);
 let h1 = await health();
 let edit = await lastCall('editMessageText');
 let ans = await lastCall('answerCallbackQuery');
-check(h1.builtinOn === h0.builtinOn - 1 && edit && edit.message_id === 777 && ans && ans.text.includes('انعطل'), `زر يعطّل صوت نظام (${h0.builtinOn}→${h1.builtinOn}) ويحدّث الرسالة`);
+check(h1.soundsActive === h0.soundsActive - 1 && edit && edit.message_id === 777 && ans && ans.text.includes('انعطل'), `زر يعطّل صوت (${h0.soundsActive}→${h1.soundsActive}) ويحدّث الرسالة`);
 await callback(admin, `t|${builtinKey}|0`);
 await wait(400);
-check((await health()).builtinOn === h0.builtinOn, 'نفس الزر يرجّعه');
+check((await health()).soundsActive === h0.soundsActive, 'نفس الزر يرجّعه');
+
+// غير الأدمن: /sounds يعطي العدد بس
+await update({ from: user, chat: pchat(user), text: '/sounds' });
+await wait(300);
+m = await lastSend();
+check(m && m.chat_id === 99 && m.text.includes(`الأصوات الفعّالة باللعبة: ${h0.soundsActive}`) && !m.reply_markup, '/sounds لغير الأدمن: عدد الأصوات الفعّالة بس');
 
 // غير الأدمن ما يكدر
 await callback(user, `ba|0|0`);
 await wait(300);
 ans = await lastCall('answerCallbackQuery');
-check(ans && ans.text.includes('بس الأدمن') && (await health()).builtinOn === h0.builtinOn, 'غير الأدمن ما يكدر يعدّل الأصوات');
+check(ans && ans.text.includes('بس الأدمن') && (await health()).soundsActive === h0.soundsActive, 'غير الأدمن ما يكدر يعدّل الأصوات');
 
 // تعطيل كل أصوات النظام ثم إرجاعها
 await callback(admin, 'ba|0|0');
 await wait(400);
-check((await health()).builtinOn === 0, 'زر يعطّل كل أصوات النظام');
+let hz = await health();
+check(hz.builtinOn === 0 && hz.library.on === 0 && hz.soundsActive === hz.sounds, 'زر يعطّل كل أصوات النظام والمكتبة');
 await callback(admin, 'ba|1|0');
 await wait(400);
-check((await health()).builtinOn === h0.builtinOn, 'زر يرجّع كل أصوات النظام');
+check((await health()).soundsActive === h0.soundsActive, 'زر يرجّع كل أصوات النظام والمكتبة');
+
+// إعادة تحميل اللي فشلت (تبقى فاشلة لأن صفحتها مكسورة بالخادم الوهمي)
+await callback(admin, 'lr||0');
+await wait(400);
+ans = await lastCall('answerCallbackQuery');
+for (let i = 0; i < 40; i++) {
+  lib = (await health()).library;
+  if (!lib.running && lib.pending === 0) break;
+  await wait(300);
+}
+check(ans && ans.text.includes('جاري التحميل') && lib.failed === 1 && lib.ready === lib.total - 1, 'زر «أعد تحميل» يعيد المحاولة');
 
 await update({ from: user, chat: pchat(user), voice: { file_id: 'FILEID_voice_x', duration: 2 } });
 await wait(300);
