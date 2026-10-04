@@ -8,6 +8,7 @@ import { api, authBody, localName } from './net.js';
 import * as ui from './ui.js';
 import { $, el } from './ui.js';
 import { REACTIONS, GAME_NAME, VERSION, MAX_PLAYERS, ROUNDS } from './shared.js';
+import { Meta } from './meta.js';
 
 initTelegram();
 
@@ -17,6 +18,7 @@ let config = {};
 let profile = null;
 let game = null;
 let busy = false;
+const meta = new Meta({});
 
 function layout() {
   const { w, h } = stageSize();
@@ -61,10 +63,13 @@ $('#exitBtn').addEventListener('click', () => game && game.askLeave());
 /* ------------------------------------------------------------ القائمة */
 
 function demoStage() {
+  // اللاعب بالنص بلبسه ومسرحه
+  const lk = meta.look();
+  stage.setTheme(lk.stage);
   stage.setPlayers([
-    { uid: 'demo1', skin: 2 },
-    { uid: 'demo2', skin: 0 },
-    { uid: 'demo3', skin: 1 },
+    { uid: 'demo1', skin: lk.skin === 2 ? 4 : 2 },
+    { uid: 'demo2', skin: lk.skin == null ? 0 : lk.skin, acc: lk.acc },
+    { uid: 'demo3', skin: lk.skin === 1 ? 3 : 1 },
   ]);
   let i = 0;
   clearInterval(demoStage.iv);
@@ -81,19 +86,27 @@ function showMenu() {
   document.documentElement.dataset.screen = 'menu';
   stage.setShot('menu');
   demoStage();
-  const s = (profile && profile.stats) || {};
   const name = (profile && profile.user && profile.user.name) || localName();
   const photo = profile && profile.user && profile.user.photo;
-  const chip = el(
+  const chip = meta.chip({ name, photo });
+  const p = meta.profile;
+  const side = el(
     'div',
-    { class: 'profile-chip' },
-    photo ? el('img', { src: photo, alt: '' }) : el('span', { class: 'pc-ph' }, name.slice(0, 1)),
-    el('div', {}, el('b', {}, name), el('small', {}, `⭐ ${s.points || 0} · 🏆 ${s.wins || 0}${s.rank ? ' · #' + s.rank : ''}`)),
+    { class: 'menu-side' },
+    el('button', { class: 'side-btn', onclick: () => meta.openShop({ onClose: showMenu }) }, el('span', {}, '🛒'), el('small', {}, 'المتجر')),
+    el('button', { class: 'side-btn pass', onclick: () => meta.openPass({ onClose: showMenu }) }, el('span', {}, '🎖️'), el('small', {}, p ? `باس ${p.pass.level}` : 'الباس')),
+    el(
+      'button',
+      { class: 'side-btn' + (p && meta.ads.rewarded && p.daily.box > 0 ? ' dot' : ''), onclick: () => meta.openShop({ tab: 'mics', onClose: showMenu }) },
+      el('span', {}, '🎁'),
+      el('small', {}, 'مجاني'),
+    ),
   );
   const menu = el(
     'div',
     { class: 'menu' },
     chip,
+    side,
     el('div', { class: 'menu-brand' }, el('div', { class: 'logo' }, GAME_NAME + '!'), el('div', { class: 'tagline' }, 'قلّد الأصوات… والذكاء يحكم 🎤')),
     el(
       'div',
@@ -196,9 +209,12 @@ function enterRoom(code, solo) {
     stage,
     audio,
     config,
+    meta,
     onExit: (silent) => {
       game = null;
-      refreshProfile();
+      refreshProfile().then(() => {
+        if (document.documentElement.dataset.screen === 'menu' && !meta.panel) showMenu();
+      });
       showMenu();
       if (!silent) haptic('light');
     },
@@ -220,6 +236,7 @@ function enterRoom(code, solo) {
 async function refreshProfile() {
   try {
     profile = await api('/api/me', authBody());
+    if (profile && profile.profile) meta.set(profile.profile);
   } catch {
     /* */
   }
@@ -233,6 +250,8 @@ async function boot() {
   } catch {
     /* */
   }
+  meta.setConfig(config);
+  if (profile && profile.profile) meta.set(profile.profile);
   $('#boot').classList.add('hide');
   setTimeout(() => $('#boot').remove(), 600);
   if (profile && profile.error) {
@@ -251,4 +270,4 @@ async function boot() {
 boot();
 
 // للتشخيص من DevTools
-window.__qd = { stage, audio, get game() { return game; }, isRotated, unsafeUser };
+window.__qd = { stage, audio, meta, get game() { return game; }, isRotated, unsafeUser };

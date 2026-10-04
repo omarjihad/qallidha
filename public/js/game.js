@@ -18,9 +18,12 @@ const LEAD = 0.25;
 const SPEAKER_SVG =
   '<svg viewBox="0 0 24 24" width="100%" height="100%"><path fill="#34d12c" stroke="#0f5a0c" stroke-width="1.1" d="M3 9h4l5-4v14l-5-4H3z"/><path fill="none" stroke="#34d12c" stroke-width="2.4" stroke-linecap="round" d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>';
 
+const gameKeyOf = (st) => `${st.code}:${st.gameNo}`;
+
 export class Game {
-  constructor({ stage, audio, config, onExit }) {
+  constructor({ stage, audio, config, meta, onExit }) {
     this.stage = stage;
+    this.meta = meta || null;
     /** @type {AudioEngine} */
     this.audio = audio;
     this.config = config || {};
@@ -176,7 +179,8 @@ export class Game {
     const prev = this.st;
     this.st = st;
     if (!this.me) return;
-    this.stage.setPlayers(st.players.map((p) => ({ uid: p.uid, skin: p.skin })));
+    this.stage.setPlayers(st.players.map((p) => ({ uid: p.uid, skin: p.skin, acc: p.acc || null })));
+    this.stage.setTheme(st.stage || 'stage:classic');
     this.syncLabels();
     const key = `${st.gameNo}:${st.round}:${st.phase}`;
     if (key !== this.phaseKey) {
@@ -229,6 +233,8 @@ export class Game {
       $('#caption').textContent = '';
     }
     if (st.phase !== 'final') ui.closeOverlay();
+    // المتجر المفتوح من غرفة الانتظار يتسكّر ويا بداية اللعبة
+    if (st.phase !== 'lobby' && this.meta) this.meta.onLook = null;
     for (const [uid, c] of this.stage.chars) {
       c.talkTarget = 0;
       if (st.phase !== 'playback' && c.atMic) this.stage.unfocus(uid);
@@ -303,7 +309,7 @@ export class Game {
         { class: 'lobby-row' },
         el('div', { class: 'room-code' }, el('small', {}, 'كود الغرفة'), el('b', {}, st.code)),
         el('button', { class: 'btn blue', onclick: () => this.invite() }, '📨 ادعُ ربعك'),
-        el('button', { class: 'btn purple', onclick: () => this.nextSkin() }, '🎭 غيّر شكلك'),
+        el('button', { class: 'btn purple', onclick: () => this.changeLook() }, this.meta && this.meta.tg ? '🎭 لبسي' : '🎭 غيّر شكلك'),
         el(
           'button',
           { class: 'btn ' + (micOk ? 'green' : 'orange pulse'), onclick: () => this.enableMic() },
@@ -333,6 +339,21 @@ export class Game {
   invite() {
     haptic('light');
     shareText(this.inviteLink(), `🎤 تعال العب وياي «قلّدها» — لعبة تقليد الأصوات!\nكود الغرفة: ${this.st.code}`);
+  }
+
+  /** لاعب تيليجرام: يفتح المتجر (لبسه)، الضيف: يبدّل بين الشخصيات المجانية */
+  changeLook() {
+    if (!this.meta || !this.meta.tg) return this.nextSkin();
+    haptic('light');
+    this.meta.onLook = () => this.conn && this.conn.send({ t: 'look' });
+    this.meta.openShop({
+      tab: 'skin',
+      onClose: () => {
+        this.meta.onLook = null;
+        ui.closeOverlay();
+        this.conn && this.conn.send({ t: 'look' });
+      },
+    });
   }
 
   nextSkin() {
@@ -813,6 +834,8 @@ export class Game {
         ),
     );
     const rest = f.slice(3).map((r) => el('div', { class: 'rest-row' }, `${r.rank}. ${r.name} — ${r.score}`));
+    const mine = f.find((r) => r.uid === this.me);
+    const rewardsSlot = el('div', { class: 'rewards-slot' });
     const confetti = el(
       'div',
       { class: 'confetti' },
@@ -825,7 +848,7 @@ export class Game {
       { class: 'final' },
       confetti,
       el('div', { class: 'final-title bubble' }, winner && winner.score > 0 ? `🏆 ${winner.name} فاز!` : 'خلصت اللعبة!'),
-      podium,
+      el('div', { class: 'final-mid' }, podium, rewardsSlot),
       rest.length ? el('div', { class: 'rest' }, rest) : null,
       el(
         'div',
@@ -836,6 +859,21 @@ export class Game {
       ),
     );
     ui.overlay(panel, 'final-layer');
+    // مكافآتي (مايكات، لفل، باس) + زر المضاعفة، وبعدها إعلان نهاية اللعبة
+    if (this.meta && mine && mine.reward) {
+      const gameNo = st.gameNo;
+      this.meta.refresh().then(() => {
+        if (!this.st || this.st.phase !== 'final' || this.st.gameNo !== gameNo) return;
+        const strip = this.meta.rewardsStrip(mine.reward);
+        if (strip) rewardsSlot.appendChild(strip);
+      });
+    }
+    if (this.meta && this.adShownFor !== gameKeyOf(st)) {
+      this.adShownFor = gameKeyOf(st);
+      setTimeout(() => {
+        if (this.active && this.st && this.st.phase === 'final' && this.meta) this.meta.ads.showInterstitial();
+      }, 2600);
+    }
   }
 
   shareResult() {

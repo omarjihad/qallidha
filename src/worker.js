@@ -6,6 +6,8 @@ import { identify, AuthError, webhookSecret } from './auth.js';
 import { handleUpdate, Tg } from './telegram.js';
 import { VERSION } from '../public/js/shared.js';
 import { LIBRARY_BY_SLUG } from './library-sounds.js';
+import { seasonOf } from '../public/js/catalog.js';
+import { passPrice, passInvoice } from './pass.js';
 
 export { Room, Hub };
 
@@ -65,6 +67,14 @@ async function libFile(env, slug) {
       'cache-control': 'public, max-age=31536000, immutable',
     },
   });
+}
+
+/** إعدادات AdsGram من متغيرات Cloudflare (فارغة = الإعلانات مطفية) */
+function adsConfig(env) {
+  return {
+    interstitial: String(env.ADSGRAM_INTERSTITIAL || '').trim() || null,
+    rewarded: String(env.ADSGRAM_REWARDED || '').trim() || null,
+  };
 }
 
 async function claimRoom(env, chatId = null) {
@@ -173,7 +183,19 @@ async function api(request, env, ctx, url) {
       bot: bot || String(env.BOT_USERNAME || '').replace('@', '') || null,
       appShort: String(env.APP_SHORT_NAME || '').trim() || null,
       guests: String(env.ALLOW_GUEST || 'true') !== 'false',
+      ads: adsConfig(env),
+      passPrice: passPrice(env),
     });
+  }
+
+  // ---------------- AdsGram: رابط المكافأة (السيرفر مالهم يستدعيه بعد ما يكمل المستخدم الإعلان)
+  if (path === '/api/adsgram/reward') {
+    const key = String(env.ADSGRAM_REWARD_KEY || '').trim();
+    if (!key || url.searchParams.get('key') !== key) return new Response('forbidden', { status: 403 });
+    const id = String(url.searchParams.get('userid') || '').replace(/\D/g, '');
+    if (!id) return new Response('bad user', { status: 400 });
+    const r = await hubOf(env).adReward('t' + id);
+    return json({ ok: !!r.ok });
   }
 
   if (path === '/api/top') {
@@ -184,8 +206,42 @@ async function api(request, env, ctx, url) {
   if (path === '/api/me' && request.method === 'POST') {
     const body = await readAuth(request);
     const user = await identify(env, body);
-    const stats = user.guest ? { games: 0, wins: 0, points: 0, best: 0, rank: null } : await hubOf(env).me(user.uid);
-    return json({ user: { uid: user.uid, name: user.name, photo: user.photo, guest: user.guest, startParam: user.startParam }, stats });
+    const hub = hubOf(env);
+    const stats = user.guest ? { games: 0, wins: 0, points: 0, best: 0, rank: null } : await hub.me(user.uid);
+    const profile = user.guest ? null : await hub.profile(user.uid, user.name, user.photo);
+    return json({ user: { uid: user.uid, name: user.name, photo: user.photo, guest: user.guest, startParam: user.startParam }, stats, profile });
+  }
+
+  // ---------------- المتجر والإعلانات والباس (لاعبين تيليجرام بس)
+  if (path.startsWith('/api/shop/') || path.startsWith('/api/ads/') || path === '/api/pass/invoice') {
+    if (request.method !== 'POST') return json({ error: 'method' }, 405);
+    const body = await readAuth(request);
+    const user = await identify(env, body);
+    if (user.guest) return json({ error: 'tg_only', message: 'افتح اللعبة من تيليجرام حتى تجمع مايكات وتشتري' }, 403);
+    const hub = hubOf(env);
+    const withProfile = async (r) => json({ ...r, profile: await hub.profile(user.uid) }, r.error ? 400 : 200);
+    if (path === '/api/shop/buy') return withProfile(await hub.buy(user.uid, String(body.item || '')));
+    if (path === '/api/shop/equip') return withProfile(await hub.equip(user.uid, String(body.slot || ''), body.item == null ? null : String(body.item)));
+    if (path === '/api/ads/intent') {
+      if (!adsConfig(env).rewarded) return json({ error: 'الإعلانات بعدها ما مفعّلة' }, 400);
+      return json(await hub.adIntent(user.uid, String(body.kind || ''), body.item == null ? null : String(body.item)));
+    }
+    if (path === '/api/ads/done') {
+      const nonce = String(body.nonce || '');
+      // إذا رابط المكافأة مضبوط بـAdsGram: المكافأة تجي من سيرفرهم بس (ضد الغش) — هنا نسأل عن الحالة
+      const secure = !!String(env.ADSGRAM_REWARD_KEY || '').trim();
+      const r = secure ? await hub.adStatus(user.uid, nonce) : await hub.adReward(user.uid, nonce);
+      return withProfile(r);
+    }
+    if (path === '/api/pass/invoice') {
+      if (!token) return json({ error: 'البوت ما مربوط' }, 400);
+      const season = seasonOf();
+      const can = await hub.canBuyPass(user.uid, season);
+      if (!can.ok) return json({ error: can.error }, 400);
+      const link = await new Tg(token, env.TG_API_BASE).call('createInvoiceLink', passInvoice(env, user.uid, season));
+      return json({ ok: true, link });
+    }
+    return json({ error: 'not_found' }, 404);
   }
 
   {
@@ -220,7 +276,8 @@ async function websocket(request, env, url) {
     return new Response(e instanceof AuthError ? e.message : 'auth failed', { status: 401 });
   }
   const headers = new Headers(request.headers);
-  headers.set('X-User', JSON.stringify({ uid: user.uid, name: user.name, photo: user.photo, guest: user.guest }));
+  // ترميز ASCII حتى الأسماء العربية ما تخرّب الهيدر
+  headers.set('X-User', encodeURIComponent(JSON.stringify({ uid: user.uid, name: user.name, photo: user.photo, guest: user.guest })));
   return roomOf(env, code).fetch(new Request(`https://room/ws?code=${code}`, { method: 'GET', headers }));
 }
 

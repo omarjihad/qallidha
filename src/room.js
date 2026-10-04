@@ -120,7 +120,7 @@ export class Room extends DurableObject {
     }
     let user = null;
     try {
-      user = JSON.parse(request.headers.get('X-User') || 'null');
+      user = JSON.parse(decodeURIComponent(request.headers.get('X-User') || 'null'));
     } catch {
       /* تجاهل */
     }
@@ -150,6 +150,7 @@ export class Room extends DurableObject {
       }
     }
     this.st.emptySince = 0;
+    if (!user.guest) await this.applyLook(user.uid);
     await this.save();
     server.send(JSON.stringify({ t: 'hello', you: user.uid, s: Date.now() }));
     this.broadcast();
@@ -190,6 +191,21 @@ export class Room extends DurableObject {
     st.order.push(user.uid);
     if (!st.host || !st.players[st.host] || !st.players[st.host].on) st.host = user.uid;
     return null;
+  }
+
+  /** شكل اللاعب من مخزونه بالـHub (شخصية + إكسسوارات + مسرح + لفل) */
+  async applyLook(uid) {
+    try {
+      const lk = await this.hub().lookOf(uid);
+      const p = this.st && this.st.players[uid];
+      if (!p || !lk) return;
+      if (lk.skin != null) p.skin = lk.skin;
+      p.acc = { head: lk.head || null, face: lk.face || null };
+      p.stage = lk.stage || 'stage:classic';
+      p.lvl = lk.level || 1;
+    } catch (e) {
+      console.log('lookOf failed', e && e.message);
+    }
   }
 
   connected(exclude = null) {
@@ -265,6 +281,11 @@ export class Room extends DurableObject {
       }
       case 'mic':
         p.mic = !!m.ok;
+        break;
+      case 'look':
+        // اللاعب غيّر لبسه بالمتجر: نقرأه من الـHub (ما نصدّق الواجهة)
+        if (p.guest || (st.phase !== 'lobby' && st.phase !== 'final')) return;
+        await this.applyLook(uid);
         break;
       case 'start':
         if (uid !== st.host || (st.phase !== 'lobby' && st.phase !== 'final')) return;
@@ -619,7 +640,12 @@ export class Room extends DurableObject {
     {
       await (async () => {
         try {
-          await this.hub().recordGame(ranking, winner);
+          const rewards = (await this.hub().recordGame(ranking, winner, `${st.code}:${st.gameNo}:${now}`)) || {};
+          for (const r of ranking) {
+            r.reward = rewards[r.uid] || null;
+            const p = st.players[r.uid];
+            if (p && r.reward) p.lvl = r.reward.lvTo;
+          }
         } catch (e) {
           console.log('recordGame failed', e && e.message);
         }
@@ -832,8 +858,9 @@ export class Room extends DurableObject {
       gameNo: st.gameNo,
       players: st.order.map((u, seat) => {
         const p = st.players[u];
-        return { uid: u, seat, name: p.name, photo: p.photo, skin: p.skin, score: p.score, mult: p.mult, on: p.on, mic: p.mic, guest: p.guest };
+        return { uid: u, seat, name: p.name, photo: p.photo, skin: p.skin, acc: p.acc || null, lvl: p.lvl || 0, score: p.score, mult: p.mult, on: p.on, mic: p.mic, guest: p.guest };
       }),
+      stage: (st.host && st.players[st.host] && st.players[st.host].stage) || 'stage:classic',
       sound: inGame && st.cur ? st.cur : null,
       preload: inGame ? st.sounds.slice(Math.max(0, st.round - 1)).map((s) => ({ url: s.url, video: !!s.video })) : [],
       t: st.t,
@@ -844,7 +871,8 @@ export class Room extends DurableObject {
       results: st.phase === 'playback' || st.phase === 'wheel' ? st.results : null,
       play: st.phase === 'playback' ? st.play : null,
       wheel,
-      finals: st.phase === 'final' ? st.finals : null,
+      // كل لاعب يشوف مكافأته بس
+      finals: st.phase === 'final' ? (st.finals || []).map((r) => (r.uid === forUid ? r : { ...r, reward: undefined })) : null,
       chat: !!st.chatId,
     };
   }

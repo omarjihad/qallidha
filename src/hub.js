@@ -6,6 +6,7 @@ import { LIBRARY_SOUNDS, LIBRARY_BY_SLUG } from './library-sounds.js';
 import { fetchLibrarySound } from './myinstants.js';
 import { Tg, adminIds } from './telegram.js';
 import { webhookSecret, toHex } from './auth.js';
+import { Economy } from './economy.js';
 
 const LIB_MAX_TRIES = 3;
 
@@ -32,6 +33,8 @@ export class Hub extends DurableObject {
     // ملفات مكتبة الميمز بعد ما تنزل
     this.sql.exec('CREATE TABLE IF NOT EXISTS lib_files (slug TEXT PRIMARY KEY, mime TEXT, size INTEGER, data BLOB, src TEXT, at INTEGER)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS lib_fail (slug TEXT PRIMARY KEY, err TEXT, tries INTEGER DEFAULT 0, at INTEGER)');
+    // المايكات واللفلات والمتجر والباس والإعلانات
+    this.eco = new Economy(this.sql);
   }
 
   /* ---------------- kv */
@@ -58,25 +61,46 @@ export class Hub extends DurableObject {
       .toArray();
   }
 
-  /** results: [{uid, name, photo, score, guest}] */
-  recordGame(results, winner) {
-    const now = Date.now();
-    for (const r of results) {
-      if (r.guest || !r.uid) continue;
-      this.sql.exec(
-        `INSERT INTO users (id, name, photo, games, wins, points, best, updated) VALUES (?, ?, ?, 1, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, photo = excluded.photo, games = games + 1,
-           wins = wins + excluded.wins, points = points + excluded.points, best = MAX(best, excluded.best), updated = excluded.updated`,
-        r.uid,
-        r.name || '',
-        r.photo || '',
-        r.uid === winner ? 1 : 0,
-        Math.max(0, Math.round(r.score || 0)),
-        Math.max(0, Math.round(r.score || 0)),
-        now,
-      );
-    }
-    return true;
+  /** results: [{uid, name, photo, score, guest}] → مكافآت كل لاعب تيليجرام */
+  recordGame(results, winner, gkey = '') {
+    return this.eco.recordGame(results, winner, gkey);
+  }
+
+  /* ---------------- الاقتصاد (RPC للعامل والغرف) */
+  profile(uid, name = '', photo = '') {
+    this.eco.ensureUser(uid, name, photo);
+    return this.eco.profile(uid);
+  }
+  buy(uid, item) {
+    return this.eco.buy(uid, item);
+  }
+  equip(uid, slot, item) {
+    return this.eco.equip(uid, slot, item);
+  }
+  lookOf(uid) {
+    return this.eco.lookOf(uid);
+  }
+  adIntent(uid, kind, item) {
+    this.eco.ensureUser(uid);
+    return this.eco.adIntent(uid, kind, item);
+  }
+  adReward(uid, nonce = null) {
+    return this.eco.adReward(uid, nonce);
+  }
+  adStatus(uid, nonce) {
+    return this.eco.adStatus(uid, nonce);
+  }
+  canBuyPass(uid, season) {
+    return this.eco.canBuyPass(uid, season);
+  }
+  grantPremium(uid, season, charge, stars) {
+    return this.eco.grantPremium(uid, season, charge, stars);
+  }
+  paymentByCharge(charge) {
+    return this.eco.paymentByCharge(charge);
+  }
+  refundPayment(charge) {
+    return this.eco.markRefunded(charge);
   }
 
   /* ---------------- الأصوات */
@@ -368,7 +392,7 @@ export class Hub extends DurableObject {
     const token = (this.env.TELEGRAM_BOT_TOKEN || '').trim();
     if (!token) return { ok: false, reason: 'TELEGRAM_BOT_TOKEN غير مضبوط' };
     const digest = toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))).slice(0, 12);
-    const stamp = `${origin}|${digest}|v5`;
+    const stamp = `${origin}|${digest}|v6`;
     if (!force && this.getKV('webhook') === stamp) return { ok: true, cached: true, bot: this.getKV('bot') };
     const tg = new Tg(token, this.env.TG_API_BASE);
     try {
@@ -377,12 +401,13 @@ export class Hub extends DurableObject {
       await tg.call('setWebhook', {
         url: origin + '/api/telegram/webhook',
         secret_token: await webhookSecret(token),
-        allowed_updates: ['message', 'callback_query'],
+        allowed_updates: ['message', 'callback_query', 'pre_checkout_query'],
       });
       await tg.call('setMyCommands', {
         commands: [
           { command: 'start', description: 'ابدأ' },
           { command: 'play', description: 'سوّي غرفة لعب' },
+          { command: 'pass', description: 'الرويال باس المميز ⭐' },
           { command: 'top', description: 'المتصدرين' },
           { command: 'sounds', description: 'كم صوت شغّال باللعبة' },
           { command: 'help', description: 'المساعدة' },

@@ -9,7 +9,12 @@ export function el(tag, attrs = {}, ...children) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
     if (k === 'class') e.className = v;
-    else if (k === 'style' && typeof v === 'object') Object.assign(e.style, v);
+    else if (k === 'style' && typeof v === 'object') {
+      for (const [sk, sv] of Object.entries(v)) {
+        if (sk.startsWith('--')) e.style.setProperty(sk, sv);
+        else e.style[sk] = sv;
+      }
+    }
     else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
     else if (k === 'html') e.innerHTML = v;
     else e.setAttribute(k, v === true ? '' : v);
@@ -155,7 +160,8 @@ export function renderCards(players, { me, host, gains = {}, badges = {} } = {})
         'data-uid': p.uid,
         style: { transform: `translateY(calc(var(--u) * ${lift.toFixed(2)})) rotate(${rot.toFixed(1)}deg)`, zIndex: String(10 + n - i) },
       },
-      el('div', { class: 'pc-face', style: { background: SKINS[p.skin % SKINS.length].card } }, el('img', { src: portrait(p.skin), alt: '' })),
+      el('div', { class: 'pc-face', style: { background: SKINS[p.skin % SKINS.length].card } }, el('img', { src: portrait(p.skin, p.acc || null), alt: '' })),
+      p.lvl ? el('div', { class: 'pc-lvl' }, String(p.lvl)) : null,
       el('div', { class: 'pc-name' }, p.name),
       el('div', { class: 'pc-score' }, String(p.score)),
       p.uid === host ? el('div', { class: 'pc-host', title: 'المضيف' }, '👑') : null,

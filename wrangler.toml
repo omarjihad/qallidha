@@ -1,6 +1,8 @@
 name = "qallidha"
 main = "src/worker.js"
 compatibility_date = "2025-09-01"
+# المتغيّرات اللي تنضاف من لوحة Cloudflare ما تنمسح وقت النشر التلقائي
+keep_vars = true
 
 # ملفات اللعبة (الواجهة + الأصوات) تُقدَّم من حافة Cloudflare مباشرةً:
 # طلباتها مجانية وغير محدودة ولا تنحسب من حد الـ100 ألف طلب يوميًا.
@@ -39,3 +41,7 @@ enabled = true
 #   ADMIN_IDS           (اختياري: آيديات الأدمن مفصولة بفاصلة — هم اللي يضيفون أصوات)
 #   APP_SHORT_NAME      (اختياري: إذا سويت Mini App بـ/newapp)
 #   PUBLIC_URL          (اختياري: إذا عندك دومين خاص)
+#   PASS_PRICE_STARS    (اختياري: سعر الرويال باس المميز بالنجوم — الافتراضي 99)
+#   ADSGRAM_REWARDED     (اختياري: BlockID مال بلوك Reward من AdsGram)
+#   ADSGRAM_INTERSTITIAL (اختياري: BlockID مال بلوك Interstitial)
+#   ADSGRAM_REWARD_KEY   (اختياري: مفتاح رابط المكافأة Reward URL)

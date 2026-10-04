@@ -1,6 +1,8 @@
 // عميل Telegram Bot API + منطق البوت (أوامر، إضافة الأصوات من الأدمن).
 
 import { GAME_NAME, MAX_PLAYERS, ROUNDS } from '../public/js/shared.js';
+import { seasonOf, seasonEnd, PASS } from '../public/js/catalog.js';
+import { passInvoice, passPrice } from './pass.js';
 
 const RLM = '‏';
 
@@ -105,8 +107,10 @@ export async function soundsMenu(hub, page = 0) {
 export async function handleUpdate(update, deps) {
   const { env, origin, hub } = deps;
   if (update.callback_query) return handleCallback(update.callback_query, deps);
+  if (update.pre_checkout_query) return handlePreCheckout(update.pre_checkout_query, deps);
   const msg = update.message;
   if (!msg || !msg.chat) return;
+  if (msg.successful_payment) return handlePaid(msg, deps);
   const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
   const chatId = msg.chat.id;
   const isPrivate = msg.chat.type === 'private';
@@ -187,15 +191,72 @@ export async function handleUpdate(update, deps) {
       return;
     }
 
+    // ---------- الرويال باس والدفع بالنجوم
+    if (cmd === '/pass') {
+      const uid = 't' + fromId;
+      const season = seasonOf();
+      const days = Math.max(1, Math.ceil((seasonEnd(season) - Date.now()) / 86400000));
+      if (!isPrivate) {
+        await send(lines('🎖️ الرويال باس يتفعّل بالخاص: افتح البوت واكتب /pass'));
+        return;
+      }
+      const can = await hub.canBuyPass(uid, season);
+      if (!can.ok) {
+        await send(lines(can.error, `باقي على نهاية الموسم ${season}: ${days} يوم`), { reply_markup: { inline_keyboard: [[playButton('')]] } });
+        return;
+      }
+      await send(
+        lines(
+          `🎖️ الرويال باس — الموسم ${season} (باقي ${days} يوم)`,
+          `المجاني: ${PASS.freeMax} لفل بجوائز. المميز: ${PASS.premiumMax} لفل وجوائز أقوى وأشياء حصرية.`,
+          `السعر: ${passPrice(env)} ⭐ — تدفع هنا بالنجوم مباشرة 👇`,
+        ),
+      );
+      await tg.call('sendInvoice', { chat_id: chatId, ...passInvoice(env, uid, season) }).catch((e) => console.log('sendInvoice', e.message));
+      return;
+    }
+
+    if (cmd === '/terms') {
+      await send(
+        lines(
+          '📜 شروط «قلّدها»:',
+          '• الرويال باس المميز يخص الموسم الحالي بس (30 يوم) ويفتح جوائز رقمية داخل اللعبة.',
+          '• الدفع بنجوم تيليجرام، والأشياء الرقمية ما تتحول لفلوس ولا تنباع.',
+          '• إذا صارت مشكلة بالدفع اكتب /paysupport وراح نرد عليك.',
+          '• نحتفظ بحق إيقاف الحسابات اللي تغش.',
+        ),
+      );
+      return;
+    }
+
+    if (cmd === '/paysupport' || cmd === '/support') {
+      if (!arg) {
+        await send(lines('🛟 للمساعدة بالدفع أو اللعبة: اكتب الأمر ووياه مشكلتك، مثل:', `${cmd} دفعت وما تفعّل الباس`));
+        return;
+      }
+      const admins = adminIds(env);
+      const who = `${msg.from?.first_name || ''}${msg.from?.username ? ' @' + msg.from.username : ''} (${fromId})`;
+      for (const a of admins) await tg.call('sendMessage', { chat_id: a, text: lines(`🛟 طلب مساعدة من ${who}:`, arg.slice(0, 1500)) }).catch(() => null);
+      await send(lines('✅ وصلت رسالتك، راح نرد عليك بأقرب وقت.'));
+      return;
+    }
+
     if (cmd === '/id') {
       await send(lines(`🆔 الآيدي مالتك: ${fromId}`, isAdmin ? '✅ إنت أدمن' : 'حطه بـADMIN_IDS إذا تريد تصير أدمن'));
       return;
     }
 
     if (cmd === '/help') {
-      const base = ['/play — سوّي غرفة لعب', '/top — المتصدرين', '/sounds — كم صوت شغّال باللعبة', '/id — الآيدي مالتك'];
+      const base = ['/play — سوّي غرفة لعب', '/pass — الرويال باس المميز بالنجوم', '/top — المتصدرين', '/sounds — كم صوت شغّال باللعبة', '/paysupport — مساعدة بالدفع', '/terms — الشروط', '/id — الآيدي مالتك'];
       const adm = isAdmin
-        ? ['', 'أوامر الأدمن:', 'دز صوت / فويس / فيديو = ينضاف للعبة (الكابشن = اسمه)', '/sounds — عدد الأصوات وكل الأصوات بأزرار (تعطيل وحذف)', '/title رقم اسم — تغيير الاسم']
+        ? [
+            '',
+            'أوامر الأدمن:',
+            'دز صوت / فويس / فيديو = ينضاف للعبة (الكابشن = اسمه)',
+            '/sounds — عدد الأصوات وكل الأصوات بأزرار (تعطيل وحذف)',
+            '/title رقم اسم — تغيير الاسم',
+            '/refund رقم_العملية — يرجّع نجوم دفعة ويلغي الباس',
+          ]
         : [];
       await send(lines(...base, ...adm));
       return;
@@ -216,6 +277,20 @@ export async function handleUpdate(update, deps) {
       const id = parseInt(arg, 10);
       const ok = id ? await hub.delSound(id) : false;
       await send(lines(ok ? `🗑️ انحذف الصوت #${id}` : 'اكتب رقم الصوت: /del 12'));
+      return;
+    }
+    if (isAdmin && cmd === '/refund') {
+      const charge = arg.trim();
+      const pay = charge ? await hub.paymentByCharge(charge) : null;
+      if (!pay) return void (await send(lines('اكتب رقم العملية: /refund رقم_العملية (يوصلك برسالة كل دفعة)')));
+      if (pay.refunded) return void (await send(lines('هاي الدفعة مرجّعة من قبل')));
+      try {
+        await tg.call('refundStarPayment', { user_id: Number(String(pay.uid).slice(1)), telegram_payment_charge_id: charge });
+        await hub.refundPayment(charge);
+        await send(lines(`↩️ رجعت ${pay.stars} ⭐ وانلغى الباس المميز للاعب ${pay.uid}`));
+      } catch (e) {
+        await send(lines('❌ ما زبط الاسترجاع: ' + e.message));
+      }
       return;
     }
     if (isAdmin && cmd === '/title') {
@@ -296,4 +371,65 @@ async function handleCallback(q, deps) {
     console.log('callback error', e && e.message);
   }
   await answer(note);
+}
+
+/* ------------------------------------------------------------ الدفع بالنجوم */
+
+function parsePassPayload(payload) {
+  const m = /^pass:(t\d+):(\d+)$/.exec(String(payload || ''));
+  return m ? { uid: m[1], season: Number(m[2]) } : null;
+}
+
+/** لازم نرد خلال 10 ثواني وإلا تيليجرام يلغي الدفع */
+async function handlePreCheckout(q, deps) {
+  const { env, hub } = deps;
+  const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
+  const p = parsePassPayload(q.invoice_payload);
+  let ok = true;
+  let error = '';
+  if (!p || p.uid !== 't' + q.from.id) {
+    ok = false;
+    error = 'الفاتورة مو إلك — افتح الباس من حسابك';
+  } else if (q.currency !== 'XTR' || q.total_amount !== passPrice(env)) {
+    ok = false;
+    error = 'السعر تغيّر، اطلب فاتورة جديدة';
+  } else {
+    const can = await hub.canBuyPass(p.uid, p.season).catch(() => ({ ok: false, error: 'صار خطأ، جرّب بعد شوية' }));
+    if (!can.ok) {
+      ok = false;
+      error = can.error;
+    }
+  }
+  await tg.call('answerPreCheckoutQuery', ok ? { pre_checkout_query_id: q.id, ok: true } : { pre_checkout_query_id: q.id, ok: false, error_message: error }).catch((e) =>
+    console.log('answerPreCheckoutQuery', e.message),
+  );
+}
+
+async function handlePaid(msg, deps) {
+  const { env, hub } = deps;
+  const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
+  const sp = msg.successful_payment;
+  const p = parsePassPayload(sp.invoice_payload);
+  if (!p) return;
+  const r = await hub.grantPremium(p.uid, p.season, sp.telegram_payment_charge_id, sp.total_amount);
+  const got = (r.rewards || []).length;
+  await tg
+    .call('sendMessage', {
+      chat_id: msg.chat.id,
+      text: lines(
+        r.already ? '✅ الباس المميز مفعّل عندك' : `🎉 تفعّل الرويال باس المميز للموسم ${r.season || p.season}!`,
+        got ? `🎁 استلمت ${got} جوائز من اللفلات اللي وصلتها` : '',
+        `صار عندك ${PASS.premiumMax} لفل بجوائز أقوى — العب وكمّل 💪`,
+        `رقم العملية (للدعم): ${sp.telegram_payment_charge_id}`,
+      ),
+    })
+    .catch(() => null);
+  if (r.already) return;
+  const f = msg.from || {};
+  const who = `${f.first_name || ''}${f.username ? ' @' + f.username : ''} (${p.uid.slice(1)})`.trim();
+  for (const a of adminIds(env)) {
+    await tg
+      .call('sendMessage', { chat_id: a, text: lines(`💰 دفعة ${sp.total_amount} ⭐ — رويال باس مميز`, `اللاعب: ${who}`, `للاسترجاع: /refund ${sp.telegram_payment_charge_id}`) })
+      .catch(() => null);
+  }
 }

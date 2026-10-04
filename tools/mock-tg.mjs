@@ -51,6 +51,8 @@ http
       let result = true;
       if (method === 'getMe') result = { id: 777, is_bot: true, first_name: 'قلّدها', username: 'qallidha_test_bot' };
       if (method === 'sendMessage') result = { message_id: ++mid, chat: { id: payload.chat_id }, text: payload.text };
+      if (method === 'createInvoiceLink') result = 'https://t.me/$invoice_' + Buffer.from(String(payload.payload)).toString('hex');
+      if (method === 'sendInvoice') result = { message_id: ++mid, chat: { id: payload.chat_id }, invoice: { title: payload.title } };
       if (method === 'getFile') {
         const p = files[payload.file_id];
         if (!p) { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: invalid file_id' })); }
