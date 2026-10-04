@@ -8,7 +8,8 @@ import { VERSION } from '../public/js/shared.js';
 
 export { Room, Hub };
 
-let webhookChecked = false;
+let webhookOkAt = 0; // نجح التسجيل بهذا الـisolate: ما نعيد
+let webhookTryAt = 0; // آخر محاولة (إذا فشلت نعيد بعد دقيقة)
 const filePathCache = new Map(); // file_id → { path, at }
 
 const json = (data, status = 200, headers = {}) =>
@@ -28,6 +29,21 @@ const roomOf = (env, code) => stub(env.ROOMS, 'r' + code, env);
 function publicOrigin(env, url) {
   const fromEnv = String(env.PUBLIC_URL || '').trim().replace(/\/$/, '');
   return fromEnv || url.origin;
+}
+
+/** تسجيل/تحديث الـwebhook كسولًا بعد أي نشر (يتجاهل إذا نفس الإعدادات). */
+function checkWebhook(env, ctx, origin) {
+  if (!(env.TELEGRAM_BOT_TOKEN || '').trim()) return;
+  if (webhookOkAt || Date.now() - webhookTryAt < 60000) return;
+  webhookTryAt = Date.now();
+  ctx.waitUntil(
+    hubOf(env)
+      .ensureWebhook(origin)
+      .then((r) => {
+        if (r && r.ok) webhookOkAt = Date.now();
+      })
+      .catch(() => null),
+  );
 }
 
 async function claimRoom(env, chatId = null) {
@@ -102,10 +118,7 @@ async function api(request, env, ctx, url) {
   const token = (env.TELEGRAM_BOT_TOKEN || '').trim();
 
   // تسجيل الـwebhook كسولًا: أول طلب بعد النشر يكفي
-  if (token && !webhookChecked) {
-    webhookChecked = true;
-    ctx.waitUntil(hubOf(env).ensureWebhook(origin).catch(() => null));
-  }
+  checkWebhook(env, ctx, origin);
 
   if (path === '/api/health') {
     let hub = null;
@@ -196,6 +209,8 @@ async function webhook(request, env, ctx, url) {
   const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
   if (secret !== (await webhookSecret(token))) return new Response('forbidden', { status: 403 });
   const update = await request.json().catch(() => null);
+  // بعد أي نشر جديد: نحدّث إعدادات الـwebhook (مثلًا أزرار /sounds تحتاج callback_query)
+  checkWebhook(env, ctx, publicOrigin(env, url));
   if (update) {
     const origin = publicOrigin(env, url);
     ctx.waitUntil(
