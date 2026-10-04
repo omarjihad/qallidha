@@ -1,0 +1,15 @@
+{
+  "name": "qallidha",
+  "version": "1.0.0",
+  "private": true,
+  "description": "قلّدها — لعبة تقليد الأصوات داخل Telegram Mini App على Cloudflare",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node tools/test-scorer.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.137.0"
+  }
+}

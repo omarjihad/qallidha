@@ -1,0 +1,4 @@
+# انسخه باسم .dev.vars للتشغيل المحلي فقط — لا ترفعه
+ALLOW_GUEST=true
+TELEGRAM_BOT_TOKEN=
+ADMIN_IDS=

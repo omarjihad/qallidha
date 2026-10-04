@@ -1,0 +1,41 @@
+name = "qallidha"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+
+# ملفات اللعبة (الواجهة + الأصوات) تُقدَّم من حافة Cloudflare مباشرةً:
+# طلباتها مجانية وغير محدودة ولا تنحسب من حد الـ100 ألف طلب يوميًا.
+[assets]
+directory = "public"
+binding = "ASSETS"
+
+# الغرف (كل غرفة كائن دائم) + الكائن المركزي (الترتيب والأصوات).
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+# تخزين SQLite — هو المتاح بالخطة المجانية.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room", "Hub"]
+
+[vars]
+# أقرب موقع لإنشاء الغرف: الشرق الأوسط (يُقرأ عند أول إنشاء لكل كائن).
+DO_LOCATION_HINT = "me"
+INIT_DATA_MAX_AGE = "86400"
+# اللعب من المتصفح بدون تيليجرام (للتجربة). حطها "false" بعد ما تتأكد كلشي يشتغل.
+ALLOW_GUEST = "true"
+# mix = الأصوات المدمجة + المضافة من البوت ، custom = المضافة بس (إذا عددها 4 أو أكثر)
+SOUND_MODE = "mix"
+
+[observability]
+enabled = true
+
+# الأسرار تنضاف من لوحة Cloudflare (Settings ← Variables and Secrets) نوع Secret:
+#   TELEGRAM_BOT_TOKEN  (مطلوب)
+#   ADMIN_IDS           (اختياري: آيديات الأدمن مفصولة بفاصلة — هم اللي يضيفون أصوات)
+#   APP_SHORT_NAME      (اختياري: إذا سويت Mini App بـ/newapp)
+#   PUBLIC_URL          (اختياري: إذا عندك دومين خاص)
