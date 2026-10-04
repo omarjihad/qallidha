@@ -697,22 +697,10 @@ export class Game {
     box.appendChild(status);
     this.wheel = new Wheel(holder);
     this.wheelUi = { status, holder };
+    // العجلة تدور لوحدها (السيرفر يدوّرها أول ما تطلع)
     const mine = st.wheel && st.wheel[this.me];
-    if (mine && mine.seg == null) {
-      status.appendChild(el('div', { class: 'wheel-hint' }, 'اضغط على العجلة حتى تدور!'));
-      holder.classList.add('tappable');
-      holder.addEventListener('click', () => this.spin(), { once: true });
-    } else if (!mine) status.appendChild(el('div', { class: 'wheel-hint' }, 'تتفرّج هالجولة 👀'));
+    status.appendChild(el('div', { class: 'wheel-hint' }, mine ? 'جاري الدوران…' : 'تتفرّج هالجولة 👀'));
     this.updateWheel(st);
-  }
-
-  spin() {
-    if (!this.wheelUi || this.wheelSpunFor === this.phaseKey) return;
-    this.wheelUi.holder.classList.remove('tappable');
-    this.wheelUi.status.innerHTML = '';
-    this.wheelUi.status.appendChild(el('div', { class: 'wheel-hint' }, 'جاري الدوران…'));
-    haptic('medium');
-    this.conn.send({ t: 'spin' });
   }
 
   updateWheel(st) {
@@ -722,7 +710,6 @@ export class Game {
     const { status, holder } = this.wheelUi;
     if (w.seg != null && this.wheelSpunFor !== this.phaseKey) {
       this.wheelSpunFor = this.phaseKey;
-      holder.classList.remove('tappable');
       status.innerHTML = '';
       status.appendChild(el('div', { class: 'wheel-hint' }, 'جاري الدوران…'));
       const elapsed = this.serverNow() - (w.spunAt || this.serverNow());

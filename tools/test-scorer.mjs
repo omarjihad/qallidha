@@ -10,6 +10,8 @@ import { applySabotage, fart } from '../public/js/effects.js';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const VERBOSE = process.argv.includes('--verbose');
+const RAWDUMP = process.argv.includes('--raw');
+const rawGroups = {};
 
 function decode(file, af = '') {
   const args = ['-v', 'error', '-i', file];
@@ -142,6 +144,8 @@ for (let k = 0; k < refs.length; k++) {
   const crossMax = Math.max(...cross);
   const crossMean = cross.reduce((a, b) => a + b, 0) / cross.length;
   for (const [g, v] of Object.entries(res)) add(g, v.score);
+  if (RAWDUMP) for (const [g, v] of Object.entries(res)) (rawGroups[g] ||= []).push(v.parts.raw ?? 0);
+  if (RAWDUMP) for (let m = 0; m < refs.length; m++) if (m !== k) (rawGroups.cross ||= []).push(compare(R, feats[m]).parts.raw ?? 0);
   add('crossMean', crossMean);
   add('crossMax', crossMax);
   rows.push({ id: r.id, ...Object.fromEntries(Object.entries(res).map(([g, v]) => [g, v.score])), xMean: Math.round(crossMean), xMax: crossMax });
@@ -176,3 +180,12 @@ const pairs = [];
 for (let k = 0; k < refs.length; k++) for (let m = 0; m < refs.length; m++) if (k !== m) pairs.push([refs[k].id, refs[m].id, compare(feats[k], feats[m]).score]);
 pairs.sort((x, y) => y[2] - x[2]);
 console.log('\nأعلى تشابه بين أصوات مختلفة:', pairs.slice(0, 8).map((p) => `${p[0]}←${p[1]}:${p[2]}`).join('  '));
+
+if (RAWDUMP) {
+  console.log('\nraw (قبل التحويل لدرجة): متوسط / أقل / أعلى / 20% / 80%');
+  for (const [g, v] of Object.entries(rawGroups)) {
+    const a = [...v].sort((x, y) => x - y);
+    const q = (p) => a[Math.min(a.length - 1, Math.floor(p * a.length))];
+    console.log(g.padEnd(10), (a.reduce((s, x) => s + x, 0) / a.length).toFixed(3), a[0].toFixed(3), a[a.length - 1].toFixed(3), q(0.2).toFixed(3), q(0.8).toFixed(3));
+  }
+}

@@ -325,9 +325,33 @@ function smooth3(arr) {
 }
 
 /** معايرة الدرجة النهائية: الخام 0..1 إلى 0..100. */
-const RAW_FLOOR = 0.5;
-const RAW_CEIL = 0.95;
-const GAMMA = 1.25;
+// تحويل التشابه الخام لدرجة من 100 — كريم مثل ألعاب الحفلات: التقليد البشري
+// (نبرة وحنجرة مختلفة) يوصل خامه عادة 0.6–0.85، فلازم ياخذ 60–95.
+// المعايرة (tools/test-scorer.mjs --raw): نفس الصوت ~1.0، تقليد زين ~0.82–0.87،
+// تقليد ضعيف ~0.70، صوت ثاني تمامًا ~0.50، ضرطة ~0.35، ضجيج ~0.24، صمت 0.
+const CURVE = [
+  [0.0, 0],
+  [0.3, 5],
+  [0.45, 25],
+  [0.55, 45],
+  [0.65, 65],
+  [0.72, 78],
+  [0.8, 88],
+  [0.88, 95],
+  [0.95, 100],
+];
+
+function curve(raw) {
+  if (raw <= CURVE[0][0]) return CURVE[0][1];
+  for (let i = 1; i < CURVE.length; i++) {
+    const [x1, y1] = CURVE[i];
+    if (raw <= x1) {
+      const [x0, y0] = CURVE[i - 1];
+      return y0 + ((raw - x0) / (x1 - x0)) * (y1 - y0);
+    }
+  }
+  return 100;
+}
 
 /**
  * يقارن تقليد اللاعب (take) بالصوت الأصلي (ref). كلاهما ناتج analyze().
@@ -582,9 +606,9 @@ export function compare(R, T) {
   }
   const raw =
     0.55 * tonalScore + 0.17 * rhythm + 0.1 * attack + 0.08 * dur + 0.05 * voice + 0.05 * env;
-  let score = 100 * Math.pow(clamp((raw - RAW_FLOOR) / (RAW_CEIL - RAW_FLOOR), 0, 1), GAMMA);
-  // اللحن هو الأساس: بلا لحن قريب لا درجة عالية مهما كان الإيقاع
-  if (vr >= 0.4 && melody < 0.25) score = Math.min(score, 30 + 60 * melody);
+  let score = curve(raw);
+  // أصوات بيها لحن: إذا اللحن بعيد كلش ما ناخذ درجة عالية بس بالإيقاع (سقف مرن)
+  if (vr >= 0.4 && melody < 0.3) score = Math.min(score, 45 + 80 * melody);
   score = Math.round(clamp(score, 0, 100));
 
   return {

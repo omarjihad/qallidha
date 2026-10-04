@@ -26,7 +26,7 @@ export const T = {
   REVEAL: 2200, // عرض الدرجة
   BACK: 500,
   NOTAKE: 1500,
-  WHEEL_AUTOSPIN: 7000,
+  WHEEL_AUTOSPIN: 900, // العجلة تدور لوحدها أول ما تطلع
   WHEEL_MAX: 20000,
   SPIN_ANIM: 4300,
   TARGET_MAX: 7000,
