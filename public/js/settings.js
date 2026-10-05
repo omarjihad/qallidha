@@ -1,6 +1,7 @@
 // إعدادات اللاعب: تنحفظ بالجهاز (localStorage) وتنسخ لحسابه بتيليجرام (CloudStorage) حتى تتبعه لأي جهاز.
 
 import { tg as webApp, platform, unsafeUser } from './tg.js';
+import { detectLang } from './lang/detect.js';
 
 const KEY = 'qd_settings';
 const CLOUD_KEY = 'settings';
@@ -21,7 +22,7 @@ const CHOICES = {
   quality: ['auto', 'low', 'medium', 'high', 'max'],
   fps: [30, 45, 60, 90, 120, 0],
   mic: ['auto', 'keep', 'release'],
-  lang: ['', 'ar', 'ru'],
+  lang: ['', 'ar', 'ru', 'en'],
 };
 
 function clean(raw) {
@@ -137,14 +138,21 @@ export function syncFromCloud() {
   });
 }
 
-const CYRILLIC = ['ru', 'uk', 'be', 'kk', 'ky', 'uz', 'tg', 'tk', 'az', 'hy', 'ka', 'mn'];
-
-/** اللغة الفعلية: اختيار اللاعب، وإلا لغة تيليجرام (الروسية للي لغتهم سلافية/آسيا الوسطى)، وإلا العربي */
+/**
+ * اللغة الفعلية: اختيار اللاعب، وإلا لغة تيليجرام: عربي للعرب (حتى لو تيليجرامه إنكليزي وهو بدولة عربية)،
+ * روسي للغات السلافية وآسيا الوسطى، وإنكليزي للباقين.
+ */
 export function currentLang() {
   if (settings.lang) return settings.lang;
   const u = unsafeUser();
-  const code = String((u && u.language_code) || (navigator.language || '')).toLowerCase().slice(0, 2);
-  return CYRILLIC.includes(code) ? 'ru' : 'ar';
+  const code = String((u && u.language_code) || navigator.language || '');
+  let tz = '';
+  try {
+    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    /* */
+  }
+  return detectLang(code, tz, navigator.languages || []);
 }
 
 /** المايك يتسكّر بعد كل تسجيل؟ تيليجرام أندرويد يسأل عن الإذن كل مرة ينفتح، فهناك يبقى مفتوح */

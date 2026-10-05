@@ -119,7 +119,7 @@ const sleepUntil = async (ts) => {
 
 await page.goto(BASE + '/');
 await page.waitForTimeout(2000);
-await tap('.menu-btns .btn.pink');
+await tap('.menu-btns .btn.friends');
 await page.waitForSelector('#lobbyBar .room-code b');
 const code = await page.$eval('#lobbyBar .room-code b', (e) => e.textContent);
 log('room', code);
@@ -191,10 +191,19 @@ while (Date.now() - t0 < 300000) {
         await sleepUntil(mine.at + mine.walk + mine.dur + 600);
         await shot('swap-score');
       } else {
+        // الدرجة توكف أول (مثلًا 30/100)، وبعدها +10 تطلع وتنضاف للرقم قدّامك (40/100)
         const first = play[0];
-        await sleepUntil(first.at + first.walk + first.dur + 900);
-        const chips = await page.$$eval('.banner.score .mult.bonus', (els) => els.map((e) => e.textContent));
-        check(chips.includes('+10'), `الدرجة وياها +10 (${chips.join(',')})`);
+        const res = st.results[first.uid];
+        check(first.reveal > 2200, `وقت العرض يطول بقدر الإضافة (${first.reveal}ms)`);
+        await sleepUntil(first.at + first.walk + first.dur + 850);
+        const num1 = await page.$eval('.banner.score > .num', (e) => e.textContent).catch(() => '');
+        const chipOn1 = await page.$eval('.banner.score .mult.bonus', (e) => e.classList.contains('go')).catch(() => null);
+        check(num1 === String(res.raw) && chipOn1 === false, `أول شي الدرجة بس: ${num1}/100 (المطلوب ${res.raw})`);
+        await shot('bonus-before');
+        await sleepUntil(first.at + first.walk + first.dur + 1900);
+        const num2 = await page.$eval('.banner.score > .num', (e) => e.textContent).catch(() => '');
+        const chips = await page.$$eval('.banner.score .mult.bonus.go', (els) => els.map((e) => e.textContent));
+        check(chips.includes('+10') && num2 === String(res.raw + 10), `وبعدها +10 تنضاف: ${num1} ← ${num2}/100 (${chips.join(',')})`);
         await shot('bonus-score');
       }
     }

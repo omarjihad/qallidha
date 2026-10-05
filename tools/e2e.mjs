@@ -65,7 +65,7 @@ const [host, ...guests] = pages;
 
 await host.goto(BASE + '/');
 await host.waitForTimeout(1800);
-await tap(host, '.menu-btns .btn.pink');
+await tap(host, '.menu-btns .btn.friends');
 await host.waitForSelector('.room-code b', { timeout: 15000 });
 const code = await host.$eval('.room-code b', (e) => e.textContent);
 log('room', code);

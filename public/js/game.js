@@ -1,7 +1,7 @@
 // متحكّم اللعبة: يحوّل حالة السيرفر إلى صوت وحركة وواجهة، بتوقيت متزامن عند الكل.
 // اللقطات مثل الأصلية: لقطة واسعة للمسرح، شاشة المثال، «حاول تقلّدها»، ولقطة قريبة لشخصيتك وقت التسجيل.
 
-import { T, WHEEL, SAB_INFO, REACTIONS, ROUNDS, isTargeted } from './shared.js';
+import { T, WHEEL, SAB_INFO, REACTIONS, ROUNDS, MAX_PLAYERS, isTargeted } from './shared.js';
 import { SR, mulawEncode, mulawDecode, hashString, peakOf } from './dsp.js';
 import { analyze, compare } from './scorer.js';
 import { applySabotage } from './effects.js';
@@ -31,13 +31,19 @@ const ROOM_ERRORS = {
 };
 
 export class Game {
-  constructor({ stage, audio, config, meta, onExit }) {
+  constructor({ stage, audio, config, meta, onExit, pub = false, onRetry = null, onQuick = null }) {
     this.stage = stage;
     this.meta = meta || null;
     /** @type {AudioEngine} */
     this.audio = audio;
     this.config = config || {};
     this.onExit = onExit;
+    // لعب عشوائي (غرفة عامة): إذا الغرفة امتلت/بدت نجرّب غيرها، وبالنهاية «🎲 غرفة ثانية»
+    this.pub = !!pub;
+    this.onRetry = onRetry;
+    this.onQuick = onQuick;
+    this.tickTimer = null;
+    this.micSent = false;
     this.conn = null;
     this.st = null;
     this.me = null;
@@ -78,12 +84,23 @@ export class Game {
       take: (x) => this.onTake(x),
       react: (m) => this.showReaction(m.uid, m.e),
       error: (m) => {
+        // لعب عشوائي: الغرفة امتلت أو بدت قبل ما نوصل — نروح لغيرها بدون ما نزعج اللاعب
+        if (this.pub && this.onRetry && !this.st && ['started', 'full', 'notfound'].includes(m.code)) {
+          const retry = this.onRetry;
+          this.onRetry = null;
+          if (this.conn) this.conn.close();
+          this.conn = null;
+          retry(code, m.code);
+          return;
+        }
         ui.toast(t(ROOM_ERRORS[m.code] || m.m || 'صار خطأ'), 3500);
         if (['started', 'full', 'kicked', 'notfound'].includes(m.code)) setTimeout(() => this.leave(true), 600);
       },
       status: (s) => this.onStatus(s),
     });
     backButton(() => this.askLeave());
+    clearInterval(this.tickTimer);
+    this.tickTimer = setInterval(() => this.tick(), 500);
   }
 
   async askLeave() {
@@ -95,6 +112,8 @@ export class Game {
   leave(silent = false) {
     this.active = false;
     this.clearTimers();
+    clearInterval(this.tickTimer);
+    this.tickTimer = null;
     if (this.conn) this.conn.close();
     this.conn = null;
     this.st = null;
@@ -189,6 +208,12 @@ export class Game {
     const prev = this.st;
     this.st = st;
     if (!this.me) return;
+    if (st.pub) this.pub = true;
+    // المايك انفتح قبل (مثلًا من زر اللعب العشوائي): نبلّغ الغرفة
+    if (!this.micSent && this.audio.micState === 'on' && st.phase === 'lobby' && this.conn) {
+      this.micSent = true;
+      this.conn.send({ t: 'mic', ok: true });
+    }
     this.stage.setPlayers(st.players.map((p) => ({ uid: p.uid, skin: p.skin, acc: p.acc || null })));
     this.stage.setTheme(st.stage || 'stage:classic');
     this.syncLabels();
@@ -315,34 +340,73 @@ export class Game {
     const mic = this.audio.micState;
     const micOk = mic === 'on' || (this.player(this.me) || {}).mic;
     const n = st.players.length;
-    const sig = [isHost, micOk, mic, n, st.code].join('|');
-    if (sig === this.lobbySig && bar.firstChild) return;
-    this.lobbySig = sig;
-    bar.innerHTML = '';
-    bar.appendChild(
-      el(
-        'div',
-        { class: 'lobby-row' },
-        el('div', { class: 'room-code' }, el('small', {}, t('كود الغرفة')), el('b', {}, st.code)),
-        el('button', { class: 'btn blue', onclick: () => this.invite() }, t('📨 ادعُ ربعك')),
-        el('button', { class: 'btn purple', onclick: () => this.changeLook() }, this.meta && this.meta.tg ? t('🎭 لبسي') : t('🎭 غيّر شكلك')),
+    const pub = !!st.pub;
+    const sig = [isHost, micOk, mic, n, st.code, pub].join('|');
+    if (sig !== this.lobbySig || !bar.firstChild) {
+      this.lobbySig = sig;
+      bar.innerHTML = '';
+      let startEl;
+      if (isHost) {
+        const label = n < 2 ? t('▶️ ابدأ (وحدك)') : pub ? t('▶️ ابدأ هسه') : t('▶️ ابدأ اللعبة');
+        startEl = el('button', { class: 'btn pink big', onclick: () => this.start() }, label);
+      } else startEl = el('div', { class: 'lobby-wait' }, pub ? t('🎲 غرفة عشوائية') : t('⏳ بانتظار المضيف يبدي…'));
+      bar.appendChild(
         el(
-          'button',
-          { class: 'btn ' + (micOk ? 'green' : 'orange pulse'), onclick: () => this.enableMic() },
-          micOk ? t('🎤 المايك جاهز') : mic === 'denied' ? t('🚫 المايك مرفوض') : t('🎤 فعّل المايك'),
+          'div',
+          { class: 'lobby-row' },
+          el('div', { class: 'room-code' + (pub ? ' pub' : '') }, el('small', {}, pub ? t('🎲 عشوائي') : t('كود الغرفة')), el('b', {}, st.code)),
+          el('button', { class: 'btn blue', onclick: () => this.invite() }, t('📨 ادعُ ربعك')),
+          el('button', { class: 'btn purple', onclick: () => this.changeLook() }, this.meta && this.meta.tg ? t('🎭 لبسي') : t('🎭 غيّر شكلك')),
+          el(
+            'button',
+            { class: 'btn ' + (micOk ? 'green' : 'orange pulse'), onclick: () => this.enableMic() },
+            micOk ? t('🎤 المايك جاهز') : mic === 'denied' ? t('🚫 المايك مرفوض') : t('🎤 فعّل المايك'),
+          ),
+          startEl,
         ),
-        isHost
-          ? el('button', { class: 'btn pink big', onclick: () => this.start() }, n < 2 ? t('▶️ ابدأ (وحدك)') : t('▶️ ابدأ اللعبة'))
-          : el('div', { class: 'lobby-wait' }, t('⏳ بانتظار المضيف يبدي…')),
-      ),
-    );
+      );
+    }
+    this.updateLobbyHint();
+  }
+
+  /** النص فوق شريط الغرفة: دعوة الربع، أو بالعشوائي: ندوّر لاعبين / تبدي بعد كذا ثانية */
+  lobbyHintText() {
+    const st = this.st;
+    const n = st.players.length;
+    if (!st.pub) return n < 2 ? t('ادعُ ربعك — لحد 5 لاعبين 🎤') : t('{n} لاعبين بالغرفة', { n });
+    if (st.autoAt) {
+      const s = Math.ceil((st.autoAt - this.serverNow()) / 1000);
+      return s > 0 ? t('⏳ اللعبة تبدي بعد {s} ثانية ({n}/{max})', { s, n, max: MAX_PLAYERS }) : t('🚀 تبدي هسه…');
+    }
+    return t('🔎 ندوّر لاعبين… ({n}/{max})', { n, max: MAX_PLAYERS });
+  }
+
+  updateLobbyHint() {
+    if (!this.st || this.st.phase !== 'lobby') return;
     const center = $('#center');
-    const txt = n < 2 ? t('ادعُ ربعك — لحد 5 لاعبين 🎤') : t('{n} لاعبين بالغرفة', { n });
+    const txt = this.lobbyHintText();
     const hint = center.querySelector('.lobby-hint');
-    if (hint) hint.textContent = txt;
-    else {
+    if (hint) {
+      if (hint.textContent !== txt) hint.textContent = txt;
+    } else {
       ui.clearCenter();
-      center.appendChild(el('div', { class: 'lobby-hint' }, txt));
+      center.appendChild(el('div', { class: 'lobby-hint' + (this.st.pub ? ' pub' : '') }, txt));
+    }
+    if (hint) hint.classList.toggle('pub', !!this.st.pub);
+  }
+
+  /** عدّادات الغرفة العامة (البداية والجولة الجاية) كل نص ثانية */
+  tick() {
+    const st = this.st;
+    if (!this.active || !st || !st.pub) return;
+    if (st.phase === 'lobby') this.updateLobbyHint();
+    if (st.phase === 'final') {
+      const box = document.querySelector('.final .next-game');
+      if (box && st.t && st.t.againAt) {
+        const s = Math.max(0, Math.ceil((st.t.againAt - this.serverNow()) / 1000));
+        const txt = t('⏳ اللعبة الجاية بعد {s} ثانية…', { s });
+        if (box.textContent !== txt) box.textContent = txt;
+      }
     }
   }
 
@@ -656,7 +720,8 @@ export class Game {
     for (const item of st.play || []) {
       const p = this.player(item.uid);
       if (!p) continue;
-      if (now > item.at + (item.walk || 0) + (item.dur || 0) + T.REVEAL) {
+      const reveal = item.reveal || T.REVEAL;
+      if (now > item.at + (item.walk || 0) + (item.dur || 0) + reveal) {
         this.revealed.add(item.uid);
         continue;
       }
@@ -717,13 +782,28 @@ export class Game {
         }
         this.setSpeakers([]);
         ui.clearCenter();
-        ui.scoreBanner(res.raw, res.mult, res.bonus || 0);
+        const mine = item.uid === this.me;
+        // الدرجة توكف، وبعدها المضاعف ونقاط العجلة تنضاف قدّام الكل (40/100 ← 50/100)
+        ui.scoreBanner(res.raw, res.mult || 1, res.bonus || 0, {
+          ms: reveal - 200,
+          stepMs: T.BONUS_STEP,
+          onStep: (kind) => {
+            this.audio.sfx(kind === 'mult' ? 'win' : 'ding', 0.7);
+            if (mine) haptic('success');
+          },
+        });
         this.audio.sfx('ding');
-        if (item.uid === this.me) haptic(res.raw >= 50 ? 'success' : 'warning');
-        this.revealed.add(item.uid);
-        this.renderCardsNow();
+        if (mine) haptic(res.raw >= 50 ? 'success' : 'warning');
+        // الكارت يتحدّث بالمجموع بعد ما تخلص الإضافات
+        const settle = (res.mult || 1) > 1 || (res.bonus || 0) > 0 ? ui.scoreSettleMs(res.mult || 1, res.bonus || 0, T.BONUS_STEP) : 0;
+        const reveal1 = () => {
+          this.revealed.add(item.uid);
+          this.renderCardsNow();
+        };
+        if (settle) this.at(item.at + item.walk + item.dur + settle, reveal1);
+        else reveal1();
       });
-      this.at(item.at + item.walk + item.dur + T.REVEAL, () => {
+      this.at(item.at + item.walk + item.dur + reveal, () => {
         this.stage.unfocus(item.uid);
         this.setFocusLabel(null);
       });
@@ -880,13 +960,35 @@ export class Game {
       el('div', { class: 'final-title bubble' }, winner && winner.score > 0 ? t('🏆 {name} فاز!', { name: winner.name }) : t('خلصت اللعبة!')),
       el('div', { class: 'final-mid' }, podium, rewardsSlot),
       rest.length ? el('div', { class: 'rest' }, rest) : null,
-      el(
-        'div',
-        { class: 'final-btns' },
-        isHost ? el('button', { class: 'btn pink big', onclick: () => this.start() }, t('🔁 لعبة جديدة')) : el('div', { class: 'lobby-wait' }, t('⏳ المضيف يكدر يبدي لعبة جديدة')),
-        el('button', { class: 'btn blue', onclick: () => this.shareResult() }, t('📤 شارك النتيجة')),
-        el('button', { class: 'btn ghost', onclick: () => this.leave() }, t('🏠 القائمة')),
-      ),
+      st.pub
+        ? // العشوائي: اللي يبقى يلعب الجاية ويا ناس جدد، أو يروح لغرفة ثانية
+          el(
+            'div',
+            { class: 'final-btns' },
+            el('div', { class: 'lobby-wait next-game' }, t('⏳ اللعبة الجاية بعد {s} ثانية…', { s: Math.max(0, Math.ceil((((st.t && st.t.againAt) || 0) - this.serverNow()) / 1000)) })),
+            el(
+              'button',
+              {
+                class: 'btn pink',
+                onclick: () => {
+                  const from = this.st && this.st.code;
+                  const quick = this.onQuick;
+                  this.leave(true);
+                  if (quick) quick(from);
+                },
+              },
+              t('🎲 غرفة ثانية'),
+            ),
+            el('button', { class: 'btn blue', onclick: () => this.shareResult() }, t('📤 شارك النتيجة')),
+            el('button', { class: 'btn ghost', onclick: () => this.leave() }, t('🏠 القائمة')),
+          )
+        : el(
+            'div',
+            { class: 'final-btns' },
+            isHost ? el('button', { class: 'btn pink big', onclick: () => this.start() }, t('🔁 لعبة جديدة')) : el('div', { class: 'lobby-wait' }, t('⏳ المضيف يكدر يبدي لعبة جديدة')),
+            el('button', { class: 'btn blue', onclick: () => this.shareResult() }, t('📤 شارك النتيجة')),
+            el('button', { class: 'btn ghost', onclick: () => this.leave() }, t('🏠 القائمة')),
+          ),
     );
     ui.overlay(panel, 'final-layer');
     // مكافآتي (مايكات، لفل، باس) + زر المضاعفة، وبعدها إعلان نهاية اللعبة

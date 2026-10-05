@@ -22,6 +22,66 @@ export const LIBRARY_SOUNDS = [
   { slug: 'ara-ara-sayonara-92340', title: 'Ara Ara Sayonara', emoji: '🔞' },
   { slug: 'happy-onichan-2654', title: 'Onii-chan', emoji: '🔞' },
 
+  // ---------------- أنمي: جمل مشهورة (v1.5) — تنزل لوحدها بعد النشر
+  // ون بيس
+  { slug: 'gomu-gomu-no-pistol', title: 'Luffy — Gomu Gomu no Pistol!', emoji: '🏴‍☠️' },
+  { slug: 'kaizoku-ou-ni-ore-wa-naru', title: 'Luffy — Kaizoku ou ni ore wa naru!', emoji: '🏴‍☠️' },
+  { slug: 'luffy-laugh-good-26576', title: 'Luffy — Shishishi', emoji: '🏴‍☠️' },
+  { slug: 'roronoa-zoro-santoryu-18360', title: 'Zoro — Santoryu Onigiri!', emoji: '🏴‍☠️' },
+  { slug: 'nami-san-45137', title: 'Sanji — Nami-swaaan!', emoji: '🏴‍☠️' },
+  { slug: 'franky-supeeer-57310', title: 'Franky — SUPEEER!', emoji: '🏴‍☠️' },
+  { slug: 'the-one-piece-is-real-98167', title: 'Whitebeard — The One Piece is real!', emoji: '🏴‍☠️' },
+  { slug: 'kaido-laugh-57771', title: 'Kaido — Wororo', emoji: '🏴‍☠️' },
+  // ناروتو
+  { slug: 'dattebayo-naruto-6237', title: 'Naruto — Dattebayo!', emoji: '🍥' },
+  { slug: 'naruto-rasengan-shippuden-23365', title: 'Naruto — Rasengan!', emoji: '🍥' },
+  { slug: 'kage-bunshin-no-jutsu-naruto-21667', title: 'Naruto — Kage Bunshin no Jutsu!', emoji: '🍥' },
+  { slug: 'sasukeeee-33193', title: 'Naruto — SASUKEEE!', emoji: '🍥' },
+  { slug: 'mangekyo-sharingan', title: 'Mangekyo Sharingan', emoji: '🍥' },
+  { slug: 'amaterasu', title: 'Amaterasu', emoji: '🍥' },
+  { slug: 'pain-itami-o-kanjiro-15457', title: 'Pain — Shinra Tensei!', emoji: '🍥' },
+  { slug: 'katon-gouka-mekkyaku-94634', title: 'Madara — Katon: Goka Mekkyaku!', emoji: '🍥' },
+  { slug: 'kakashi-raikiri-84986', title: 'Kakashi — Raikiri!', emoji: '🍥' },
+  // بليتش
+  { slug: 'ichigo-bankai-11188', title: 'Ichigo — Bankai!', emoji: '🗡️' },
+  { slug: 'getsuga-tenshooouuuuu', title: 'Ichigo — Getsuga Tenshooo!', emoji: '🗡️' },
+  { slug: 'bankai-byakuya', title: 'Byakuya — Senbonzakura Kageyoshi', emoji: '🗡️' },
+  { slug: 'psycho-bleach-hollow-ichigo', title: 'Hollow Ichigo — Hahaha!', emoji: '🗡️' },
+  // بلاك كلوفر
+  { slug: 'asta-black-clover-96668', title: 'Asta — Mada mada!', emoji: '🍀' },
+  // دراغون بول
+  { slug: 'kamehameha', title: 'Goku — Kamehameha!', emoji: '🐉' },
+  { slug: 'over-9000', title: "Vegeta — It's over 9000!", emoji: '🐉' },
+  { slug: 'vegeta-final-flash', title: 'Vegeta — Final Flash!', emoji: '🐉' },
+  { slug: 'frieza-ohohohohoh-46566', title: 'Frieza — Ohohoho', emoji: '🐉' },
+  // جوجو
+  { slug: 'yare-yare-daze-jotaro-kujo-444', title: 'Jotaro — Yare yare daze', emoji: '🕺' },
+  { slug: 'jotaro-kujo-ora-ora-ora-jojo', title: 'Jotaro — ORA ORA ORA!', emoji: '🕺' },
+  { slug: 'muda-muda-muda-muda-muda-muda-48281', title: 'DIO — MUDA MUDA MUDA!', emoji: '🕺' },
+  { slug: 'kono-dio-da', title: 'DIO — Kono Dio da!', emoji: '🕺' },
+  // هجوم العمالقة
+  { slug: 'tatakae-eren-9985', title: 'Eren — Tatakae!', emoji: '⚔️' },
+  { slug: 'levi-scream-kenny-51396', title: 'Levi — KENNY!', emoji: '⚔️' },
+  { slug: 'eren-titan-roar-4089', title: 'Eren — Titan roar', emoji: '⚔️' },
+  // قاتل الشياطين
+  { slug: 'zenitsu-lightning-breath-54616', title: 'Zenitsu — Hekireki Issen', emoji: '🔥' },
+  { slug: 'rengoku-umai-73805', title: 'Rengoku — Umai!', emoji: '🔥' },
+  { slug: 'inosuke-laugh-89636', title: 'Inosuke — Gahaha!', emoji: '🔥' },
+  // جوجوتسو كايسن
+  { slug: 'gojo-domain-expansion-60533', title: 'Gojo — Ryoiki Tenkai: Muryokusho', emoji: '🤞' },
+  { slug: 'nah-id-win-96219', title: "Gojo — Nah, I'd win", emoji: '🤞' },
+  { slug: 'jujutsu-kaisen-besto-friendo-81988', title: 'Todo — Besto friendo!', emoji: '🤞' },
+  // ديث نوت
+  { slug: 'keikaku-doori', title: 'Light — Keikaku doori', emoji: '📓' },
+  { slug: 'death-note-kiras-laugh-26964', title: 'Kira — Hahaha!', emoji: '📓' },
+  // بوكيمون، ون بنش، هيرو أكاديميا، سباي فاميلي
+  { slug: 'pika-pika', title: 'Pikachu — Pika pika!', emoji: '⚡' },
+  { slug: 'saitama-ok-62742', title: 'Saitama — OK.', emoji: '👊' },
+  { slug: 'saitama-serious-punch-49697', title: 'Saitama — Serious Punch!', emoji: '👊' },
+  { slug: 'all-might-plus-ultra', title: 'All Might — Plus Ultra!', emoji: '💥' },
+  { slug: 'deku-smash-93369', title: 'Deku — Smash!', emoji: '💥' },
+  { slug: 'sxf-anya-waku-waku-27649', title: 'Anya — Waku waku!', emoji: '🥜' },
+
   // ---------------- عربي عام
   { slug: 'qbhk-llh-wqbh-m-jyt-bh-83', title: 'قبحك الله، وقبح ما جئت به', emoji: '🎭' },
   { slug: 'wlk-y-hqwwd-84976', title: 'ولك يا حقوود', emoji: '😤' },

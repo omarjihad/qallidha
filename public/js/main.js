@@ -153,7 +153,8 @@ function showMenu() {
     el(
       'div',
       { class: 'menu-btns' },
-      el('button', { class: 'btn pink big', onclick: () => createRoom(false) }, t('🎤 العب ويا ربعك')),
+      el('button', { class: 'btn pink big quick', onclick: () => quickMatch() }, t('🎲 لعب عشوائي')),
+      el('button', { class: 'btn purple friends', onclick: () => createRoom(false) }, t('🎤 العب ويا ربعك')),
       el('button', { class: 'btn blue', onclick: joinByCode }, t('🔢 ادخل بكود')),
       el('button', { class: 'btn green', onclick: () => createRoom(true) }, t('🎯 تحدّي فردي')),
     ),
@@ -178,6 +179,45 @@ async function createRoom(solo) {
   try {
     const { code } = await api('/api/rooms', authBody());
     enterRoom(code, solo);
+  } catch (e) {
+    ui.toast(t(e.message || 'صار خطأ'));
+  } finally {
+    busy = false;
+  }
+}
+
+/**
+ * لعب عشوائي ويا ناس ما تعرفهم: السيرفر يختار غرفة عامة بيها مكان (أو يسوّي وحدة وننتظر بيها).
+ * إذا الغرفة امتلت أو بدت قبل ما نوصل، نجرّب غيرها لوحدنا.
+ */
+async function quickMatch({ exclude = [], bad = '', tries = 0 } = {}) {
+  if (busy) return;
+  busy = true;
+  haptic('medium');
+  await audio.unlock();
+  // نطلب المايك بنفس اللمسة: الغرفة العامة تبدي لوحدها، فخلي يكون جاهز
+  if (tries === 0 && audio.micState !== 'on') {
+    audio
+      .openMic()
+      .then((ok) => {
+        if (ok && audio.releaseAfterRecord) audio.closeMic();
+      })
+      .catch(() => null);
+  }
+  if (!game) ui.toast(t('🔎 ندوّر غرفة…'), 1500);
+  try {
+    const { code } = await api('/api/quick', { ...authBody(), exclude, bad });
+    enterRoom(code, false, {
+      pub: true,
+      onRetry: (failed, why) => {
+        if (tries >= 3) {
+          ui.toast(t('ما لگينا غرفة هسه — جرّب مرة ثانية'), 3000);
+          if (game) game.leave(true);
+          return;
+        }
+        quickMatch({ exclude: [...exclude, failed], bad: why === 'notfound' ? failed : '', tries: tries + 1 });
+      },
+    });
   } catch (e) {
     ui.toast(t(e.message || 'صار خطأ'));
   } finally {
@@ -250,7 +290,7 @@ function showHelp() {
   );
 }
 
-function enterRoom(code, solo) {
+function enterRoom(code, solo, { pub = false, onRetry = null } = {}) {
   if (game) game.leave(true);
   stage.setPlayers([]);
   game = new Game({
@@ -258,6 +298,10 @@ function enterRoom(code, solo) {
     audio,
     config,
     meta,
+    pub,
+    onRetry,
+    // «🎲 غرفة ثانية» من نهاية لعبة عامة
+    onQuick: (from) => quickMatch({ exclude: from ? [from] : [] }),
     onExit: (silent) => {
       game = null;
       refreshProfile().then(() => {

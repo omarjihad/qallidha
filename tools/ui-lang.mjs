@@ -1,6 +1,6 @@
-// لقطات الواجهة بالروسي: لاعب تيليجرام لغته ru (بدون اختيار) → اللعبة تفتح بالروسي لوحدها.
+// لقطات الواجهة بلغة ثانية: لاعب تيليجرام لغته ru أو en (بدون اختيار) → اللعبة تفتح بلغته لوحدها.
 // القائمة، المتجر، الباس، الإعدادات، المساعدة، المتصدرين، الكود، الغرفة، وجولة وحدة لحد العجلة.
-//   node tools/ui-ru.mjs <out-dir>
+//   UI_LANG=en node tools/ui-lang.mjs <out-dir>     (UI_LANG=ru هو الافتراضي)
 import { chromium } from 'playwright';
 import { createHmac } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -8,7 +8,8 @@ import { mkdirSync } from 'node:fs';
 
 const BASE = process.env.BASE || 'http://127.0.0.1:8787';
 const TOKEN = process.env.TOKEN || '123456:TEST-token_abcdefghijklmnop';
-const out = process.argv[2] || '/tmp/ui-ru';
+const LANG = /^(ru|en)$/.test(process.env.UI_LANG || '') ? process.env.UI_LANG : 'ru';
+const out = process.argv[2] || `/tmp/ui-${LANG}`;
 mkdirSync(out, { recursive: true });
 const log = (...a) => console.log(new Date().toISOString().slice(11, 23), ...a);
 let ok = 0;
@@ -18,20 +19,26 @@ const check = (cond, label) => {
   else bad++;
   log(cond ? '✅' : '❌', label);
 };
+// نصوص متوقعة بكل لغة
+const X = {
+  ru: { name: 'Иван', tz: 'Europe/Moscow', random: /Случайная/, wheel: /очк|×|Обмен|Помех|Эхо|Пук|Белка|Нарезка/ },
+  en: { name: 'Sam', tz: 'Europe/London', random: /Random/, wheel: /points|×|Swap|Echo|Static|Fart|Squirrel|Chop/ },
+}[LANG];
+
 function sign(user) {
-  const p = new URLSearchParams({ auth_date: String(Math.floor(Date.now() / 1000)), query_id: 'AAru', user: JSON.stringify(user) });
+  const p = new URLSearchParams({ auth_date: String(Math.floor(Date.now() / 1000)), query_id: 'AAlang', user: JSON.stringify(user) });
   const pairs = [...p.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => `${k}=${v}`).join('\n');
   const key = createHmac('sha256', 'WebAppData').update(TOKEN).digest();
   p.set('hash', createHmac('sha256', key).update(pairs).digest('hex'));
   return p.toString();
 }
-const user = { id: 780000 + Math.floor(Math.random() * 9000), first_name: 'Иван', language_code: 'ru' };
+const user = { id: 780000 + Math.floor(Math.random() * 9000), first_name: X.name, language_code: LANG };
 const initData = sign(user);
 
 const browser = await chromium.launch({
   args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
 });
-const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1.5, isMobile: true, hasTouch: true });
+const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1.5, isMobile: true, hasTouch: true, timezoneId: X.tz, locale: LANG });
 await ctx.route('https://telegram.org/**', (r) => r.fulfill({ status: 200, contentType: 'application/javascript', body: '' }));
 await ctx.addInitScript(
   ({ initData, user }) => {
@@ -59,7 +66,7 @@ await ctx.addInitScript(
     document.addEventListener('DOMContentLoaded', () => {
       const bar = document.createElement('div');
       bar.innerHTML = '<span>✕ Close</span><span>⌄ ⋮</span>';
-      bar.style.cssText = 'position:fixed;left:0;right:0;top:32px;height:56px;display:flex;justify-content:space-between;align-items:center;padding:0 10px;z-index:99999;pointer-events:none;font:600 15px sans-serif;color:#fff';
+      bar.style.cssText = 'position:fixed;left:0;right:0;top:32px;height:56px;display:flex;justify-content:space-between;align-items:center;padding:0 10px;z-index:99999;pointer-events:none;font:600 15px sans-serif;color:#fff;direction:ltr';
       for (const sp of bar.children) sp.style.cssText = 'background:rgba(40,40,40,.85);border-radius:20px;padding:8px 14px';
       document.documentElement.appendChild(bar);
     });
@@ -99,11 +106,11 @@ async function clearOfHeader(sel, label) {
 await page.goto(BASE + '/');
 await page.waitForTimeout(3000);
 const head = await page.evaluate(() => ({ dir: document.documentElement.dir, lang: document.documentElement.lang, play: document.querySelector('.menu-btns .btn.pink').textContent }));
-check(head.dir === 'ltr' && head.lang === 'ru' && /Играть/.test(head.play), `تلقائي من لغة تيليجرام: ${JSON.stringify(head)}`);
+check(head.dir === 'ltr' && head.lang === LANG && X.random.test(head.play), `تلقائي من لغة تيليجرام: ${JSON.stringify(head)}`);
 await clearOfHeader('.menu-side .side-btn, .menu-btns button, .menu-top button, .profile-chip', 'أزرار القائمة');
 // اللعبة مدوّرة: سطر المحتوى = نفس x بالجهاز، فنقارن مراكز الأزرار
 const rows = await page.$$eval('.menu-btns button', (bs) => new Set(bs.map((b) => { const r = b.getBoundingClientRect(); return Math.round((r.left + r.width / 2) / 6); })).size);
-check(rows === 1, `أزرار القائمة بسطر واحد (${rows})`);
+check(rows === 1, `أزرار القائمة الأربعة بسطر واحد (${rows})`);
 await shot('menu');
 
 await tap('.menu-side .side-btn', 0);
@@ -113,9 +120,6 @@ await shot('shop-skins');
 await tap('.tabs .tab', 1);
 await page.waitForTimeout(600);
 await shot('shop-head');
-await tap('.tabs .tab', 3);
-await page.waitForTimeout(600);
-await shot('shop-stage');
 await tap('.tabs .tab', 4);
 await page.waitForTimeout(600);
 await shot('shop-mics');
@@ -132,6 +136,8 @@ await page.waitForTimeout(800);
 await tap('.menu-top .gear');
 await page.waitForSelector('.panel.settings');
 await page.waitForTimeout(600);
+const langs = await page.$$eval('.set-row:first-child .seg-btn', (bs) => bs.map((b) => b.textContent));
+check(langs.join(',') === 'العربية,English,Русский', `الإعدادات: ثلاث لغات (${langs.join(',')})`);
 await shot('settings');
 await page.$eval('.set-body', (e) => (e.scrollTop = e.scrollHeight));
 await page.waitForTimeout(300);
@@ -149,14 +155,9 @@ await page.waitForTimeout(1500);
 await shot('top');
 await tap('.panel.board .xbtn');
 await page.waitForTimeout(700);
-await tap('.menu-btns .btn.blue');
-await page.waitForTimeout(800);
-await shot('keypad');
-await tap('.panel.keypad .xbtn');
-await page.waitForTimeout(700);
 
-// جولة وحدة بالروسي
-await tap('.menu-btns .btn.pink');
+// جولة وحدة (غرفة ويا الربع، المضيف يبدي)
+await tap('.menu-btns .btn.friends');
 await page.waitForSelector('#lobbyBar .room-code b', { timeout: 15000 });
 await page.waitForTimeout(2000);
 await clearOfHeader('#exitBtn, #setBtn, #lobbyBar button, #lobbyBar .room-code', 'أزرار الغرفة');
@@ -192,14 +193,14 @@ while (Date.now() - t0 < 150000) {
         const res = await page.$eval('.wheel-result', (e) => e.textContent).catch(() => '');
         await page.waitForTimeout(400);
         await shot('wheel');
-        check(/очк|×|Обмен|Помех|Эхо|Пук|Белка|Нарезка/.test(res), `نتيجة العجلة بالروسي: «${res}»`);
+        check(X.wheel.test(res), `نتيجة العجلة مترجمة: «${res}»`);
         break;
       }
     }
   }
   await page.waitForTimeout(250);
 }
-const missing = warns.filter((w) => /ru missing/.test(w));
+const missing = warns.filter((w) => /(ru|en) missing/.test(w));
 check(missing.length === 0, `ماكو نص ناقص الترجمة (${missing.length})${missing.length ? ': ' + missing.slice(0, 6).join(' | ') : ''}`);
 const errs = warns.filter((w) => /pageerror/.test(w));
 check(errs.length === 0, `ماكو أخطاء بالصفحة ${errs.join(' | ')}`);

@@ -221,8 +221,26 @@ button { font-family: inherit; }
     0.03em 0.08em 0 #1c0608, -0.03em 0.08em 0 #1c0608, 0 0.14em 0 #1c0608, 0 0.2em 0.25em rgba(0, 0, 0, 0.35);
 }
 .banner.score .slash { font-size: calc(var(--u) * 11); }
+.banner.score .den {
+  display: inline-flex; align-items: center; gap: calc(var(--u) * 2.6); max-width: calc(var(--u) * 60); overflow: visible;
+  transition: opacity 0.3s, max-width 0.35s, margin 0.35s;
+}
+.banner.score > .num { display: inline-block; transition: color 0.3s; }
+.banner.score > .num.hit { animation: numHit 0.45s ease-out; }
+@keyframes numHit { 35% { transform: scale(1.22) rotate(-2deg); } }
+/* فوق الـ100 بفضل العجلة: «/100» تختفي والرقم يصير ذهبي */
+.banner.score.over .den { opacity: 0; max-width: 0; margin-inline-start: calc(var(--u) * -2.6); overflow: hidden; }
+.banner.score.over > .num { color: #ffd23f; }
 .banner.score .mult { font-size: calc(var(--u) * 6); background: var(--blue); border-radius: 99px; padding: 0 calc(var(--u) * 2); color: #fff; }
-.banner.score .mult.bonus { background: linear-gradient(180deg, #ffe066, #f0a500); color: #3a2400; animation: popIn 0.4s 0.75s both; }
+.banner.score .mult.bonus { background: linear-gradient(180deg, #ffe066, #f0a500); color: #3a2400; }
+/* المضاعف والنقاط تطلع وحدة وحدة وتنضاف للرقم قدّامك */
+.banner.score.steps .mult { opacity: 0; transform: scale(0.3); }
+.banner.score.steps .mult.go { animation: chipPop 0.55s cubic-bezier(0.2, 1.6, 0.4, 1) forwards; }
+@keyframes chipPop {
+  0% { opacity: 0; transform: scale(0.3) rotate(-12deg); }
+  55% { opacity: 1; transform: scale(1.4) rotate(5deg); box-shadow: 0 0 calc(var(--u) * 4) rgba(255, 224, 102, 0.9); }
+  100% { opacity: 1; transform: scale(1) rotate(0); box-shadow: 0 0 0 rgba(255, 224, 102, 0); }
+}
 .banner.small.swap { top: 24%; font-size: calc(var(--u) * 4.8); color: #b9ffcf; font-weight: 800; }
 
 /* نصوص صغيرة بيضاء مثل «Spinning...» */
@@ -394,6 +412,19 @@ button { font-family: inherit; }
   width: max-content; max-width: calc(100% - var(--safe-left) - var(--safe-right) - var(--u) * 4);
   display: flex; flex-wrap: wrap; justify-content: center; gap: calc(var(--u) * 2.4); align-items: center;
 }
+/* أربع أزرار: الثانوية أصغر شوية حتى يبقون بسطر واحد */
+.menu-btns .btn:not(.big) { font-size: calc(var(--u) * 4); padding: calc(var(--u) * 1.9) calc(var(--u) * 3.6); }
+/* «لعب عشوائي» الزر الرئيسي: لمعة خفيفة */
+.menu-btns .btn.quick { position: relative; overflow: hidden; }
+.menu-btns .btn.quick::after {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 40%; left: -60%; pointer-events: none;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.35), transparent); animation: shine 3.2s 1s ease-in-out infinite;
+}
+@keyframes shine { 0%, 60% { left: -60%; } 100% { left: 130%; } }
+/* الغرفة العامة: النص فوق الشريط بحبة واضحة، والكود أخضر */
+.lobby-hint.pub { background: rgba(20, 0, 6, 0.5); padding: calc(var(--u) * 0.6) calc(var(--u) * 3.2); border-radius: 99px; backdrop-filter: blur(3px); }
+.room-code.pub b { color: #9ff0b5; }
+.final .next-game { font-size: calc(var(--u) * 3.8); }
 .profile-chip {
   position: absolute; top: calc(var(--safe-top) + var(--u) * 3); right: calc(var(--safe-right) + var(--u) * 3);
   display: flex; align-items: center; gap: calc(var(--u) * 2); background: rgba(0, 0, 0, 0.38); border-radius: 99px;
@@ -711,7 +742,23 @@ button.mics-pill { border: 0; cursor: pointer; font-family: inherit; font-weight
 .toggle.on { background: var(--green); }
 .toggle.on i { inset-inline-start: calc(var(--u) * 5.6); }
 .slider-box { display: flex; align-items: center; gap: calc(var(--u) * 1.2); direction: ltr; }
-.slider { width: calc(var(--u) * 38); accent-color: var(--pink); height: calc(var(--u) * 5); margin: 0; }
+/* شريط الصوت: منطقة لمس عريضة، والسحب كله للشريط (ما يصير تمرير) */
+.vslider {
+  --p: 0.5; position: relative; width: calc(var(--u) * 38); height: calc(var(--u) * 7.5); flex: none;
+  touch-action: none; cursor: pointer; -webkit-tap-highlight-color: transparent; outline: none;
+}
+.vs-track {
+  position: absolute; left: calc(var(--u) * 2.3); right: calc(var(--u) * 2.3); top: 50%; height: calc(var(--u) * 1.6);
+  translate: 0 -50%; border-radius: 99px; background: rgba(255, 255, 255, 0.18); overflow: hidden;
+}
+.vs-fill { position: absolute; inset: 0 auto 0 0; width: calc(var(--p) * 100%); background: linear-gradient(90deg, #ff7aa8, var(--pink)); border-radius: 99px; }
+.vs-thumb {
+  position: absolute; top: 50%; left: calc(var(--u) * 2.3 + (100% - var(--u) * 4.6) * var(--p)); translate: -50% -50%;
+  width: calc(var(--u) * 4.6); height: calc(var(--u) * 4.6); border-radius: 50%; background: #fff;
+  box-shadow: 0 0 0 calc(var(--u) * 0.6) var(--pink), 0 calc(var(--u) * 0.5) calc(var(--u) * 1.2) rgba(0, 0, 0, 0.45); transition: scale 0.12s;
+  pointer-events: none;
+}
+.vslider.drag .vs-thumb, .vslider:focus-visible .vs-thumb { scale: 1.18; }
 .step-btn {
   width: calc(var(--u) * 6); height: calc(var(--u) * 6); border-radius: 50%; border: 0; background: rgba(255, 255, 255, 0.14);
   color: #fff; font-size: calc(var(--u) * 3.8); font-weight: 800; cursor: pointer; line-height: 1; padding: 0; font-family: inherit;

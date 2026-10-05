@@ -4,7 +4,7 @@
 import { settings, setSetting, resetSettings, onSetting } from './settings.js';
 import { t, LANG } from './i18n.js';
 import { $, el } from './ui.js';
-import { haptic, platform } from './tg.js';
+import { haptic, platform, isRotated, toLocalPoint } from './tg.js';
 import { VERSION } from './shared.js';
 
 const QUALITY = [
@@ -29,6 +29,7 @@ const MIC = [
 ];
 const LANGS = [
   ['ar', 'العربية'],
+  ['en', 'English'],
   ['ru', 'Русский'],
 ];
 
@@ -63,7 +64,8 @@ export function openSettings({ inGame = false, onClose = null, stats = null } = 
         el(
           'button',
           {
-            class: 'seg-btn' + (settings[key] === v ? ' on' : ''),
+            // اللغة على «تلقائي»: نأشّر على اللغة الشغّالة هسه
+            class: 'seg-btn' + ((key === 'lang' ? settings.lang || LANG : settings[key]) === v ? ' on' : ''),
             'data-v': String(v),
             disabled: disabled ? '' : null,
             onclick: () => {
@@ -78,21 +80,78 @@ export function openSettings({ inGame = false, onClose = null, stats = null } = 
       ),
     );
 
+  // شريط صوت مسوّى باليد: <input type=range> داخل اللعبة المدوّرة يفلت من الإصبع (المتصفح يحسب السحب تمرير)،
+  // فهنا السحب كله إلنا (touch-action: none) ونحسب الموقع بعد التدوير.
   const slider = (key) => {
-    const val = el('span', { class: 'slider-val' }, `${Math.round(settings[key] * 100)}%`);
-    const input = el('input', { type: 'range', min: '0', max: '100', step: '5', value: String(Math.round(settings[key] * 100)), class: 'slider', 'data-key': key });
-    input.addEventListener('input', () => {
-      setSetting(key, Number(input.value) / 100);
-      val.textContent = `${input.value}%`;
-    });
-    const step = (d) => {
-      const v = Math.max(0, Math.min(100, Math.round(settings[key] * 100) + d));
-      input.value = String(v);
-      setSetting(key, v / 100);
+    const pct = () => Math.round(settings[key] * 100);
+    const val = el('span', { class: 'slider-val' }, `${pct()}%`);
+    const track = el('div', { class: 'vs-track' }, el('i', { class: 'vs-fill' }));
+    const bar = el(
+      'div',
+      { class: 'vslider', role: 'slider', tabindex: '0', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(pct()), 'data-key': key },
+      track,
+      el('b', { class: 'vs-thumb' }),
+    );
+    const paint = (v) => {
+      bar.style.setProperty('--p', String(v / 100));
+      bar.setAttribute('aria-valuenow', String(v));
       val.textContent = `${v}%`;
+    };
+    const set = (v, buzz = false) => {
+      v = Math.max(0, Math.min(100, Math.round(v)));
+      const before = pct();
+      paint(v);
+      if (v === before) return;
+      setSetting(key, v / 100);
+      if (buzz && Math.floor(v / 10) !== Math.floor(before / 10)) haptic('select');
+    };
+    // موقع الإصبع على الشريط (0..100) بفضاء اللعبة نفسه
+    const at = (e) => {
+      const r = track.getBoundingClientRect();
+      const rot = isRotated();
+      const p = rot ? toLocalPoint(e.clientX, e.clientY).x : e.clientX;
+      const start = rot ? r.top : r.left;
+      const len = (rot ? r.height : r.width) || 1;
+      return ((p - start) / len) * 100;
+    };
+    let drag = null;
+    bar.addEventListener('pointerdown', (e) => {
+      if (drag !== null) return;
+      drag = e.pointerId;
+      try {
+        bar.setPointerCapture(e.pointerId);
+      } catch {
+        /* */
+      }
+      bar.classList.add('drag');
+      e.preventDefault();
+      set(at(e), true);
+    });
+    bar.addEventListener('pointermove', (e) => {
+      if (drag !== e.pointerId) return;
+      e.preventDefault();
+      set(at(e), true);
+    });
+    const end = (e) => {
+      if (drag === null || (e && e.pointerId !== drag)) return;
+      drag = null;
+      bar.classList.remove('drag');
+    };
+    bar.addEventListener('pointerup', end);
+    bar.addEventListener('pointercancel', end);
+    bar.addEventListener('lostpointercapture', end);
+    bar.addEventListener('keydown', (e) => {
+      const d = { ArrowRight: 5, ArrowUp: 5, ArrowLeft: -5, ArrowDown: -5 }[e.key];
+      if (!d) return;
+      e.preventDefault();
+      set(pct() + d);
+    });
+    paint(pct());
+    const step = (d) => {
+      set(pct() + d);
       haptic('select');
     };
-    return el('div', { class: 'slider-box' }, el('button', { class: 'step-btn', onclick: () => step(-10) }, '−'), input, el('button', { class: 'step-btn', onclick: () => step(10) }, '+'), val);
+    return el('div', { class: 'slider-box' }, el('button', { class: 'step-btn', onclick: () => step(-10) }, '−'), bar, el('button', { class: 'step-btn', onclick: () => step(10) }, '+'), val);
   };
 
   const toggle = (key) =>

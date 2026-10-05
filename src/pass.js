@@ -1,5 +1,5 @@
 // فواتير نجوم تيليجرام (XTR): الرويال باس المميز، باقات المايكات، لفلات الباس، والمميز+.
-// تُستعمل من التطبيق ومن البوت. العنوان والوصف بلغة اللاعب (عربي أو روسي).
+// تُستعمل من التطبيق ومن البوت. العنوان والوصف بلغة اللاعب (عربي، روسي أو إنكليزي).
 
 import { STAR_PACK, packPrice } from '../public/js/catalog.js';
 
@@ -32,9 +32,20 @@ const TEXT = {
     plusTitle: (s) => `Премиум +10 ур., сезон ${s}`,
     plusDesc: 'Премиум-пропуск (100 уровней) и 10 уровней в подарок с наградами сразу. На текущий сезон.',
   },
+  en: {
+    passTitle: (s) => `Premium Royal Pass — Season ${s}`,
+    passDesc: 'Unlocks 100 Royal Pass levels instead of 50, with better rewards: exclusive characters, accessories, stages and more mics. For the current season.',
+    passLabel: 'Premium Royal Pass',
+    micsTitle: (n) => `${fmt(n)} mics 🎤`,
+    micsDesc: (n) => `Adds ${fmt(n)} mics to your balance — spend them on characters, accessories and stages in “Copy That!”.`,
+    lvTitle: (n) => (n === 1 ? '1 Royal Pass level' : `${n} Royal Pass levels`),
+    lvDesc: (n) => `Advances your Royal Pass by ${n === 1 ? '1 level' : n + ' levels'} this season. Rewards are delivered instantly.`,
+    plusTitle: (s) => `Premium + 10 levels, S${s}`,
+    plusDesc: 'The Premium Royal Pass (100 levels) plus 10 bonus levels with instant rewards. For the current season.',
+  },
 };
 
-const pickLang = (lang) => (lang === 'ru' ? TEXT.ru : TEXT.ar);
+const pickLang = (lang) => TEXT[lang] || TEXT.ar;
 
 /** فاتورة الرويال باس المميز بالنجوم (XTR) */
 export function passInvoice(env, uid, season, lang = 'ar') {

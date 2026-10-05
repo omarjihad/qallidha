@@ -78,12 +78,25 @@ function adsConfig(env) {
   };
 }
 
-async function claimRoom(env, chatId = null) {
+async function claimRoom(env, chatId = null, pub = false) {
   for (let i = 0; i < 8; i++) {
     const code = String(10000 + Math.floor((crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296) * 90000));
-    if (await roomOf(env, code).claim({ code, chatId })) return code;
+    if (await roomOf(env, code).claim({ code, chatId, pub })) return code;
   }
   throw new Error('ما لگينا غرفة فارغة، جرّب مرة ثانية');
+}
+
+/** لغة الفاتورة */
+const invLang = (l) => (l === 'ru' || l === 'en' ? l : 'ar');
+
+/** منين دخل اللاعب اللعبة (لإشعار الأدمن) */
+function appSource(user) {
+  const m = /^r(\d{5})$/.exec(user.startParam || '');
+  if (m) return `رابط دعوة لغرفة ${m[1]}`;
+  if (user.chatType === 'group' || user.chatType === 'supergroup') return 'اللعبة من كروب';
+  if (user.chatType === 'channel') return 'اللعبة من قناة';
+  if (user.startParam) return `اللعبة (${String(user.startParam).slice(0, 30)})`;
+  return 'فتح اللعبة';
 }
 
 async function readAuth(request) {
@@ -209,8 +222,11 @@ async function api(request, env, ctx, url) {
     const body = await readAuth(request);
     const user = await identify(env, body);
     const hub = hubOf(env);
+    const lang = ['ar', 'ru', 'en'].includes(body.lang) ? body.lang : '';
     const stats = user.guest ? { games: 0, wins: 0, points: 0, best: 0, rank: null } : await hub.me(user.uid);
-    const profile = user.guest ? null : await hub.profile(user.uid, user.name, user.photo);
+    const profile = user.guest ? null : await hub.profile(user.uid, user.name, user.photo, lang);
+    // أول مرة يفتح اللعبة (وما دخل البوت قبل): إشعار للأدمن
+    if (!user.guest && user.tg) ctx.waitUntil(hub.join({ ...user.tg, src: appSource(user) }).catch(() => null));
     return json({ user: { uid: user.uid, name: user.name, photo: user.photo, guest: user.guest, startParam: user.startParam }, stats, profile });
   }
 
@@ -240,7 +256,7 @@ async function api(request, env, ctx, url) {
       const season = seasonOf();
       const can = await hub.canBuyPass(user.uid, season);
       if (!can.ok) return json({ error: can.error }, 400);
-      const link = await new Tg(token, env.TG_API_BASE).call('createInvoiceLink', passInvoice(env, user.uid, season, body.lang === 'ru' ? 'ru' : 'ar'));
+      const link = await new Tg(token, env.TG_API_BASE).call('createInvoiceLink', passInvoice(env, user.uid, season, invLang(body.lang)));
       return json({ ok: true, link });
     }
     if (path === '/api/stars/invoice') {
@@ -249,7 +265,7 @@ async function api(request, env, ctx, url) {
       const season = seasonOf();
       const can = await hub.canBuyPack(user.uid, sku, season);
       if (!can.ok) return json({ error: can.error }, 400);
-      const inv = packInvoice(env, user.uid, sku, season, body.lang === 'ru' ? 'ru' : 'ar');
+      const inv = packInvoice(env, user.uid, sku, season, invLang(body.lang));
       if (!inv) return json({ error: 'هاي الباقة مو موجودة' }, 400);
       const link = await new Tg(token, env.TG_API_BASE).call('createInvoiceLink', inv);
       return json({ ok: true, link });
@@ -269,6 +285,25 @@ async function api(request, env, ctx, url) {
     const body = await readAuth(request);
     await identify(env, body);
     return json({ code: await claimRoom(env) });
+  }
+
+  // اللعب العشوائي: أقرب غرفة عامة بيها مكان، وإذا ماكو نسوّي وحدة جديدة وننتظر بيها ناس
+  if (path === '/api/quick' && request.method === 'POST') {
+    const body = await readAuth(request);
+    await identify(env, body);
+    const hub = hubOf(env);
+    const okCode = (c) => /^\d{5}$/.test(String(c || ''));
+    const exclude = Array.isArray(body.exclude) ? body.exclude.filter(okCode).map(String).slice(0, 12) : [];
+    const bad = okCode(body.bad) ? String(body.bad) : '';
+    const found = await hub.quickRoom(exclude, bad);
+    if (found && found.code) return json({ code: found.code, fresh: false });
+    const code = await claimRoom(env, null, true);
+    await hub.mmAdd(code);
+    return json({ code, fresh: true });
+  }
+
+  if (path === '/api/quick/stats') {
+    return json(await hubOf(env).mmStats());
   }
 
   return json({ error: 'not_found' }, 404);

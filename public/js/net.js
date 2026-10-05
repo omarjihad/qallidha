@@ -1,7 +1,7 @@
 // الاتصال بالسيرفر: طلبات API + اتصال الغرفة (WebSocket) مع مزامنة الساعة وإعادة الاتصال.
 
 import { initData, insideTelegram, unsafeUser } from './tg.js';
-import { t } from './i18n.js';
+import { t, LANG } from './i18n.js';
 
 const store = {
   get(k) {
@@ -38,9 +38,10 @@ export function guestIdentity() {
 }
 
 export function authBody() {
-  if (insideTelegram) return { initData: initData() };
+  // lang: لغة اللعبة، حتى البوت يحچي ويا اللاعب بنفسها
+  if (insideTelegram) return { initData: initData(), lang: LANG };
   const g = guestIdentity();
-  return { guestId: g.id, guestName: g.name };
+  return { guestId: g.id, guestName: g.name, lang: LANG };
 }
 
 export async function api(path, body) {

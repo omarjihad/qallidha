@@ -1,10 +1,11 @@
-// يجمع كل النصوص العربية اللي تنعرض للاعب (مفاتيح الترجمة) ويقارنها بالقاموس الروسي.
+// يجمع كل النصوص العربية اللي تنعرض للاعب (مفاتيح الترجمة) ويقارنها بالقاموسين الروسي والإنكليزي.
 // node tools/i18n-keys.mjs           → يطبع الناقص
 // node tools/i18n-keys.mjs --all     → يطبع كل المفاتيح
 import { readFileSync, readdirSync } from 'node:fs';
 import { ITEMS, RARITY } from '../public/js/catalog.js';
 import { WHEEL, SAB_INFO, GAME_NAME } from '../public/js/shared.js';
 import RU from '../public/js/lang/ru.js';
+import EN from '../public/js/lang/en.js';
 
 const AR = /[\u0600-\u06FF]/;
 const keys = new Map(); // key → where
@@ -75,18 +76,24 @@ for (const f of ['src/economy.js', 'src/worker.js', 'src/auth.js', 'src/telegram
   for (const m of src.matchAll(/'([^'\\]*(?:\\.[^'\\]*)*)'/g)) add(unescape(m[1]), 'src/economy.js');
 }
 // رسائل احتياطية تمر بـ t(متغير)
-for (const k of ['صار خطأ', 'ما زبط', 'ما زبطت الفاتورة', 'ما ينفع هسه', 'ماكو اتصال', 'خطأ بالاتصال', 'صار خطأ بالاتصال']) add(k, 'fallback');
+for (const k of ['صار خطأ', 'ما زبط', 'ما زبطت الفاتورة', 'ما ينفع هسه', 'ماكو اتصال', 'خطأ بالاتصال', 'صار خطأ بالاتصال', 'ما لگينا غرفة فارغة، جرّب مرة ثانية']) add(k, 'fallback');
 
 const all = process.argv.includes('--all');
 let missing = 0;
+const DICTS = { ru: RU, en: EN };
 for (const [k, where] of keys) {
-  if (all) console.log(JSON.stringify(k), '//', where);
-  else if (!(k in RU)) {
-    missing++;
-    console.log(JSON.stringify(k) + ':', '//', where);
+  if (all) {
+    console.log(JSON.stringify(k), '//', where);
+    continue;
+  }
+  for (const [lang, d] of Object.entries(DICTS)) {
+    if (!(k in d)) {
+      missing++;
+      console.log(`[${lang}]`, JSON.stringify(k) + ':', '//', where);
+    }
   }
 }
-const extra = Object.keys(RU).filter((k) => !keys.has(k));
-console.error(`\n${keys.size} مفتاح · ناقص بالروسي: ${missing} · زايد بالقاموس: ${extra.length}`);
-if (process.argv.includes('--extra')) for (const k of extra) console.error('  extra:', JSON.stringify(k));
+const extra = Object.fromEntries(Object.entries(DICTS).map(([l, d]) => [l, Object.keys(d).filter((k) => !keys.has(k))]));
+console.error(`\n${keys.size} مفتاح · ناقص: ${missing} · زايد بالقاموس: ru ${extra.ru.length}، en ${extra.en.length}`);
+if (process.argv.includes('--extra')) for (const [l, ks] of Object.entries(extra)) for (const k of ks) console.error(`  extra ${l}:`, JSON.stringify(k));
 process.exit(missing ? 1 : 0);

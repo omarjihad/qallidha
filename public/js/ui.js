@@ -59,33 +59,71 @@ export function clearCenter() {
   $('#center').innerHTML = '';
 }
 
-/** «X / 100» بالوردي الغامق تحت المايك — مثل الأصلية. */
-export function scoreBanner(raw, mult = 1, bonus = 0) {
+/** توقيت عدّاد الدرجة: يعد للدرجة، وبعدها كل مضاعف/نقاط عجلة خطوة لحالها */
+export const SCORE_COUNT_MS = 700;
+const STEP_GAP = 300;
+const STEP_COUNT_MS = 450;
+
+/** متى تخلص كل الخطوات (ملي ثانية من بداية العرض) */
+export function scoreSettleMs(mult = 1, bonus = 0, stepMs = 800) {
+  const steps = (mult > 1 ? 1 : 0) + (bonus > 0 ? 1 : 0);
+  return steps ? SCORE_COUNT_MS + STEP_GAP + (steps - 1) * stepMs + STEP_COUNT_MS : SCORE_COUNT_MS;
+}
+
+/**
+ * «X / 100» بالوردي الغامق تحت المايك — مثل الأصلية.
+ * إذا عنده مضاعف أو نقاط من العجلة: الرقم يوكف على الدرجة، وبعدها ×2 تطلع وتضرب الرقم قدّامك،
+ * و+10 تطلع وتنضاف (40/100 ← 50/100). onStep(kind) لكل خطوة (صوت واهتزاز).
+ */
+export function scoreBanner(raw, mult = 1, bonus = 0, { ms = 2000, stepMs = 800, onStep = null } = {}) {
   const c = $('#center');
-  const b = el(
-    'div',
-    { class: 'banner score' },
-    el('span', { class: 'num' }, '0'),
-    el('span', { class: 'slash' }, '/'),
-    el('span', { class: 'num' }, '100'),
-    mult > 1 ? el('span', { class: 'mult' }, `×${mult}`) : null,
-    bonus > 0 ? el('span', { class: 'mult bonus' }, `+${bonus}`) : null,
-  );
+  const num = el('span', { class: 'num' }, '0');
+  const den = el('span', { class: 'den' }, el('span', { class: 'slash' }, '/'), el('span', { class: 'num' }, '100'));
+  const steps = [];
+  let value = raw;
+  if (mult > 1) {
+    value = Math.round(raw * mult);
+    steps.push({ kind: 'mult', chip: el('span', { class: 'mult' }, `×${mult}`), to: value });
+  }
+  if (bonus > 0) {
+    value += bonus;
+    steps.push({ kind: 'bonus', chip: el('span', { class: 'mult bonus' }, `+${bonus}`), to: value });
+  }
+  const b = el('div', { class: 'banner score' + (steps.length ? ' steps' : '') }, num, den, steps.map((s) => s.chip));
   c.appendChild(b);
   setTimeout(() => {
     b.classList.add('out');
     setTimeout(() => b.remove(), 320);
-  }, 2000);
-  // عدّاد تصاعدي
-  const num = b.querySelector('.num');
-  const t0 = performance.now();
-  const dur = 700;
-  const tick = (now) => {
-    const p = Math.min(1, (now - t0) / dur);
-    num.textContent = String(Math.round(raw * (1 - Math.pow(1 - p, 3))));
-    if (p < 1) requestAnimationFrame(tick);
+  }, ms);
+
+  let shown = 0;
+  const countTo = (from, to, dur) => {
+    const t0 = performance.now();
+    const tick = (now) => {
+      if (!b.isConnected) return;
+      const p = Math.min(1, (now - t0) / dur);
+      shown = Math.round(from + (to - from) * (1 - Math.pow(1 - p, 3)));
+      num.textContent = String(shown);
+      if (shown > 100) b.classList.add('over');
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   };
-  requestAnimationFrame(tick);
+  countTo(0, raw, SCORE_COUNT_MS);
+  steps.forEach((s, i) => {
+    setTimeout(
+      () => {
+        if (!b.isConnected) return;
+        s.chip.classList.add('go');
+        num.classList.remove('hit');
+        void num.offsetWidth;
+        num.classList.add('hit');
+        countTo(i ? steps[i - 1].to : raw, s.to, STEP_COUNT_MS);
+        if (onStep) onStep(s.kind);
+      },
+      SCORE_COUNT_MS + STEP_GAP + i * stepMs,
+    );
+  });
   return b;
 }
 

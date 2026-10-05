@@ -99,7 +99,7 @@ await shot(host, 'join-notfound');
 await host.evaluate(() => document.querySelector('.keypad .xbtn')?.click());
 await host.waitForTimeout(500);
 
-await tap(host, '.menu-btns .btn.pink');
+await tap(host, '.menu-btns .btn.friends');
 await host.waitForSelector('.room-code b');
 const code = await host.$eval('.room-code b', (e) => e.textContent);
 for (const g of guests) await g.goto(BASE + '/?room=' + code);
@@ -233,7 +233,7 @@ await host.waitForTimeout(1500);
 await host.evaluate(() => document.querySelector('.final-btns .btn.ghost')?.click());
 await host.waitForTimeout(1500);
 const menuOk = await host.evaluate(() => document.documentElement.dataset.screen === 'menu' && !!document.querySelector('.menu-btns'));
-await host.evaluate(() => document.querySelector('.menu-btns .btn.pink')?.click());
+await host.evaluate(() => document.querySelector('.menu-btns .btn.friends')?.click());
 await host.waitForSelector('.room-code b', { timeout: 15000 });
 await host.waitForTimeout(1500);
 const clean = await host.evaluate(() => ({

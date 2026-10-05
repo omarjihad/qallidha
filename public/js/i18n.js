@@ -1,13 +1,15 @@
-// الترجمة: النص العربي بالكود هو المفتاح، والقاموس الروسي يرجّع المقابل.
-// t('الجولة {r} من {n}', {r: 1, n: 4}) — المتغيرات بين {}، والقيمة بالقاموس ممكن تكون دالة (للجمع بالروسي).
+// الترجمة: النص العربي بالكود هو المفتاح، وقاموس اللغة (روسي أو إنكليزي) يرجّع المقابل.
+// t('الجولة {r} من {n}', {r: 1, n: 4}) — المتغيرات بين {}، والقيمة بالقاموس ممكن تكون دالة (للجمع).
 // تغيير اللغة يعيد تحميل اللعبة، فاللغة ثابتة طول الجلسة.
 
 import RU from './lang/ru.js';
+import EN from './lang/en.js';
 import { currentLang } from './settings.js';
 
 export const LANG = currentLang();
 export const RTL = LANG === 'ar';
 
+const DICT = LANG === 'ru' ? RU : LANG === 'en' ? EN : null;
 const missing = new Set();
 
 function fill(s, vars) {
@@ -19,13 +21,13 @@ function fill(s, vars) {
 export function t(s, vars) {
   if (s == null) return '';
   const key = String(s);
-  if (LANG === 'ru') {
-    const v = RU[key];
+  if (DICT) {
+    const v = DICT[key];
     if (typeof v === 'function') return v(vars || {});
     if (typeof v === 'string') return fill(v, vars);
     if (/[؀-ۿ]/.test(key) && !missing.has(key)) {
       missing.add(key);
-      console.warn('[i18n] ru missing:', key);
+      console.warn(`[i18n] ${LANG} missing:`, key);
     }
   }
   return fill(key, vars);

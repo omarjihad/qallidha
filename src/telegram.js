@@ -1,13 +1,29 @@
 // عميل Telegram Bot API + منطق البوت (أوامر، إضافة الأصوات من الأدمن).
+// رسائل اللاعبين بلغته (عربي/روسي/إنكليزي — نفس قاموس اللعبة)، ورسائل الأدمن بالعربي.
 
-import { GAME_NAME, MAX_PLAYERS, ROUNDS } from '../public/js/shared.js';
+import { MAX_PLAYERS, ROUNDS } from '../public/js/shared.js';
 import { seasonOf, seasonEnd, PASS, STAR_PACK, packPrice } from '../public/js/catalog.js';
 import { passInvoice, passPrice, parsePackPayload } from './pass.js';
+import { langFromCode } from '../public/js/lang/detect.js';
 import RU from '../public/js/lang/ru.js';
+import EN from '../public/js/lang/en.js';
 
-/** ترجمة رسالة عربية للروسي (نفس قاموس اللعبة) */
-const tr = (lang, s) => (lang === 'ru' && typeof RU[s] === 'string' ? RU[s] : s);
-const langOf = (from) => (/^(ru|uk|be|kk|ky|uz|tg|tk)/i.test(String((from && from.language_code) || '')) ? 'ru' : 'ar');
+const DICTS = { ru: RU, en: EN };
+
+/** ترجمة نص عربي للغة اللاعب (نفس قاموس اللعبة). {x} = متغيرات */
+export function tr(lang, s, vars) {
+  const d = DICTS[lang];
+  let v = d ? d[s] : undefined;
+  if (typeof v === 'function') return v(vars || {});
+  if (typeof v !== 'string') v = s;
+  return vars ? v.replace(/\{(\w+)\}/g, (m, k) => (k in vars && vars[k] != null ? String(vars[k]) : m)) : v;
+}
+
+/** لغة اللاعب: اللي اختارها باللعبة، وإلا لغة تيليجرام مالته */
+export function langOf(from, stored = '') {
+  if (stored === 'ar' || stored === 'ru' || stored === 'en') return stored;
+  return langFromCode((from && from.language_code) || '');
+}
 
 const RLM = '‏';
 
@@ -58,7 +74,9 @@ function mediaOf(msg) {
   return null;
 }
 
+/** سطور الرسالة: العربي ياخذ علامة RLM حتى يبين يمين لليسار، والباقي بدونها */
 const lines = (...l) => l.map((s) => (s ? RLM + s : '')).join('\n');
+const linesFor = (lang) => (lang === 'ar' ? lines : (...l) => l.join('\n'));
 
 const PER_PAGE = 10;
 
@@ -105,6 +123,14 @@ export async function soundsMenu(hub, page = 0) {
   return { text, reply_markup: { inline_keyboard: rows } };
 }
 
+/** منين دخل اللاعب البوت (لإشعار الأدمن) */
+function botSource(cmd, arg) {
+  if (cmd !== '/start') return 'رسالة للبوت';
+  const m = /^r(\d{5})$/.exec(arg || '');
+  if (m) return `رابط دعوة لغرفة ${m[1]}`;
+  return arg ? `/start ${String(arg).slice(0, 30)}` : '/start بالبوت';
+}
+
 /**
  * يعالج تحديثًا واحدًا من تيليجرام. لا يرمي أبدًا.
  * deps: { env, origin, hub, claimRoom(chatId) → code }
@@ -125,45 +151,73 @@ export async function handleUpdate(update, deps) {
   const [cmdRaw, ...rest] = text.split(/\s+/);
   const cmd = (cmdRaw || '').split('@')[0].toLowerCase();
   const arg = rest.join(' ').trim();
-  const send = (t, extra = {}) => tg.call('sendMessage', { chat_id: chatId, text: t, ...extra }).catch(() => null);
+  const send = (s, extra = {}) => tg.call('sendMessage', { chat_id: chatId, text: s, ...extra }).catch(() => null);
 
-  let bot = await hub.getKV('bot');
-  if (!bot) {
-    try {
-      bot = (await tg.call('getMe')).username;
-      await hub.setKV('bot', bot);
-    } catch {
-      bot = '';
-    }
-  }
-  const link = bot ? appLink(bot, env) : '';
-
-  const playButton = (room) => {
-    if (isPrivate) return { text: '🎮 العب هسه', web_app: { url: origin + '/' + (room ? `?room=${room}` : '') } };
-    if (link) return { text: '🎮 ادخل اللعبة', url: link + (room ? `?startapp=r${room}` : '') };
-    return { text: '🎮 العب', url: origin + '/' };
-  };
+  // أول مرة يدخل البوت: إشعار للأدمن بمعلوماته (بالخلفية)
+  const from = msg.from || {};
+  const joined =
+    isPrivate && from.id && !from.is_bot
+      ? hub
+          .join({
+            id: from.id,
+            first_name: from.first_name || '',
+            last_name: from.last_name || '',
+            username: from.username || '',
+            language_code: from.language_code || '',
+            is_premium: !!from.is_premium,
+            src: botSource(cmd, arg),
+          })
+          .catch(() => null)
+      : null;
 
   try {
+    const info = await hub.botInfo(fromId ? 't' + fromId : '');
+    let bot = info.bot;
+    if (!bot) {
+      try {
+        bot = (await tg.call('getMe')).username;
+        await hub.setKV('bot', bot);
+      } catch {
+        bot = '';
+      }
+    }
+    const link = bot ? appLink(bot, env) : '';
+    const lang = langOf(from, info.lang);
+    const t = (s, vars) => tr(lang, s, vars);
+    const L = linesFor(lang);
+
+    const playButton = (room) => {
+      if (isPrivate) return { text: t('🎮 العب هسه'), web_app: { url: origin + '/' + (room ? `?room=${room}` : '') } };
+      if (link) return { text: t('🎮 ادخل اللعبة'), url: link + (room ? `?startapp=r${room}` : '') };
+      return { text: t('🎮 العب'), url: origin + '/' };
+    };
+
     // ---------- أوامر
     if (cmd === '/start' && isPrivate) {
       const m = /^r(\d{5})$/.exec(arg);
-      const name = (msg.from?.first_name || '').slice(0, 20);
+      const name = (from.first_name || '').slice(0, 20);
       const kb = [[playButton(m ? m[1] : '')]];
-      if (bot) kb.push([{ text: '👥 ضيفني لكروب حتى تلعبون سوا', url: `https://t.me/${bot}?startgroup=play` }]);
+      if (bot) kb.push([{ text: t('👥 ضيفني لكروب حتى تلعبون سوا'), url: `https://t.me/${bot}?startgroup=play` }]);
       await send(
-        lines(
-          `🎤 هلا ${name}! هاي «${GAME_NAME}» — لعبة تقليد الأصوات.`,
+        L(
+          t('🎤 هلا {name}! هاي «قلّدها» — لعبة تقليد الأصوات.', { name }),
           '',
-          'تسمعون صوت (إسعاف، بزونة، ضحكة شريرة، ميمز…) والكل يقلّده بنفس اللحظة — فرصة وحدة بس!',
-          'وبعدين كل تسجيل ينعاد قدام الكل، وياخذ درجة من 100.',
-          'بين الجولات تدور العجلة: نقاط، مضاعفات، وتخريب على ربعك 😈',
+          t('تسمعون صوت (إسعاف، بزونة، ضحكة شريرة، ميمز…) والكل يقلّده بنفس اللحظة — فرصة وحدة بس!'),
+          t('وبعدين كل تسجيل ينعاد قدام الكل، وياخذ درجة من 100.'),
+          t('بين الجولات تدور العجلة: نقاط، مضاعفات، وتخريب على ربعك 😈'),
           '',
-          `🧑‍🤝‍🧑 لحد ${MAX_PLAYERS} لاعبين — ${ROUNDS} جولات`,
-          '👇 اضغط وابدي',
+          t('🧑‍🤝‍🧑 لحد {p} لاعبين — {r} جولات', { p: MAX_PLAYERS, r: ROUNDS }),
+          t('🎲 العب ويا ربعك، أو عشوائي ويا ناس من كل مكان'),
+          t('👇 اضغط وابدي'),
         ),
         { reply_markup: { inline_keyboard: kb } },
       );
+      // زر القائمة بلغة اللاعب (الافتراضي عربي)
+      if (lang !== 'ar') {
+        await tg
+          .call('setChatMenuButton', { chat_id: chatId, menu_button: { type: 'web_app', text: t('🎮 العب'), web_app: { url: origin + '/' } } })
+          .catch(() => null);
+      }
       return;
     }
 
@@ -171,11 +225,11 @@ export async function handleUpdate(update, deps) {
     if (cmd === '/play' || cmd === '/game' || cmd === '/start') {
       const code = await deps.claimRoom(isPrivate ? null : chatId);
       await send(
-        lines(
-          '🎤 تحدي تقليد الأصوات بدأ!',
-          `🔢 الغرفة: ${code}`,
-          `🧑‍🤝‍🧑 لحد ${MAX_PLAYERS} لاعبين — أول واحد يدخل يصير المضيف`,
-          '👇 ادخلوا من الزر',
+        L(
+          t('🎤 تحدي تقليد الأصوات بدأ!'),
+          t('🔢 الغرفة: {code}', { code }),
+          t('🧑‍🤝‍🧑 لحد {p} لاعبين — أول واحد يدخل يصير المضيف', { p: MAX_PLAYERS }),
+          t('👇 ادخلوا من الزر'),
         ),
         { reply_markup: { inline_keyboard: [[playButton(code)]] } },
       );
@@ -184,13 +238,13 @@ export async function handleUpdate(update, deps) {
 
     if (cmd === '/top') {
       const rows = await hub.top(10);
-      if (!rows.length) return void (await send(lines('🏆 بعد ماكو أحد بالترتيب — كون أول واحد!')));
+      if (!rows.length) return void (await send(L(t('🏆 بعد ماكو أحد بالترتيب — كون أول واحد!'))));
       const medal = ['🥇', '🥈', '🥉'];
       await send(
-        lines(
-          '🏆 المتصدرين:',
+        L(
+          t('🏆 المتصدرين:'),
           '',
-          ...rows.map((r, i) => `${medal[i] || i + 1 + '.'} ${r.name} — ${r.points} نقطة (${r.wins} فوز)`),
+          ...rows.map((r, i) => t('{m} {name} — {p} نقطة ({w} فوز)', { m: medal[i] || i + 1 + '.', name: r.name, p: r.points, w: r.wins })),
         ),
       );
       return;
@@ -202,34 +256,34 @@ export async function handleUpdate(update, deps) {
       const season = seasonOf();
       const days = Math.max(1, Math.ceil((seasonEnd(season) - Date.now()) / 86400000));
       if (!isPrivate) {
-        await send(lines('🎖️ الرويال باس يتفعّل بالخاص: افتح البوت واكتب /pass'));
+        await send(L(t('🎖️ الرويال باس يتفعّل بالخاص: افتح البوت واكتب /pass')));
         return;
       }
       const can = await hub.canBuyPass(uid, season);
       if (!can.ok) {
-        await send(lines(can.error, `باقي على نهاية الموسم ${season}: ${days} يوم`), { reply_markup: { inline_keyboard: [[playButton('')]] } });
+        await send(L(t(can.error), t('باقي على نهاية الموسم {s}: {d} يوم', { s: season, d: days })), { reply_markup: { inline_keyboard: [[playButton('')]] } });
         return;
       }
       await send(
-        lines(
-          `🎖️ الرويال باس — الموسم ${season} (باقي ${days} يوم)`,
-          `المجاني: ${PASS.freeMax} لفل بجوائز. المميز: ${PASS.premiumMax} لفل وجوائز أقوى وأشياء حصرية.`,
-          `السعر: ${passPrice(env)} ⭐ — تدفع هنا بالنجوم مباشرة 👇`,
+        L(
+          t('🎖️ الرويال باس — الموسم {s} (باقي {d} يوم)', { s: season, d: days }),
+          t('المجاني: {f} لفل بجوائز. المميز: {p} لفل وجوائز أقوى وأشياء حصرية.', { f: PASS.freeMax, p: PASS.premiumMax }),
+          t('السعر: {price} ⭐ — تدفع هنا بالنجوم مباشرة 👇', { price: passPrice(env) }),
         ),
       );
-      await tg.call('sendInvoice', { chat_id: chatId, ...passInvoice(env, uid, season) }).catch((e) => console.log('sendInvoice', e.message));
+      await tg.call('sendInvoice', { chat_id: chatId, ...passInvoice(env, uid, season, lang) }).catch((e) => console.log('sendInvoice', e.message));
       return;
     }
 
     if (cmd === '/terms') {
       await send(
-        lines(
-          '📜 شروط «قلّدها»:',
-          '• الرويال باس المميز ولفلاته يخصّون الموسم الحالي بس (30 يوم) ويفتحون جوائز رقمية داخل اللعبة.',
-          '• باقات المايكات تنضاف لرصيدك داخل اللعبة وتصرفها بالمتجر.',
-          '• الدفع بنجوم تيليجرام، والأشياء الرقمية ما تتحول لفلوس ولا تنباع.',
-          '• إذا صارت مشكلة بالدفع اكتب /paysupport وراح نرد عليك.',
-          '• نحتفظ بحق إيقاف الحسابات اللي تغش.',
+        L(
+          t('📜 شروط «قلّدها»:'),
+          t('• الرويال باس المميز ولفلاته يخصّون الموسم الحالي بس (30 يوم) ويفتحون جوائز رقمية داخل اللعبة.'),
+          t('• باقات المايكات تنضاف لرصيدك داخل اللعبة وتصرفها بالمتجر.'),
+          t('• الدفع بنجوم تيليجرام، والأشياء الرقمية ما تتحول لفلوس ولا تنباع.'),
+          t('• إذا صارت مشكلة بالدفع اكتب /paysupport وراح نرد عليك.'),
+          t('• نحتفظ بحق إيقاف الحسابات اللي تغش.'),
         ),
       );
       return;
@@ -237,23 +291,31 @@ export async function handleUpdate(update, deps) {
 
     if (cmd === '/paysupport' || cmd === '/support') {
       if (!arg) {
-        await send(lines('🛟 للمساعدة بالدفع أو اللعبة: اكتب الأمر ووياه مشكلتك، مثل:', `${cmd} دفعت وما تفعّل الباس`));
+        await send(L(t('🛟 للمساعدة بالدفع أو اللعبة: اكتب الأمر ووياه مشكلتك، مثل:'), t('{cmd} دفعت وما تفعّل الباس', { cmd })));
         return;
       }
       const admins = adminIds(env);
-      const who = `${msg.from?.first_name || ''}${msg.from?.username ? ' @' + msg.from.username : ''} (${fromId})`;
+      const who = `${from.first_name || ''}${from.username ? ' @' + from.username : ''} (${fromId})`;
       for (const a of admins) await tg.call('sendMessage', { chat_id: a, text: lines(`🛟 طلب مساعدة من ${who}:`, arg.slice(0, 1500)) }).catch(() => null);
-      await send(lines('✅ وصلت رسالتك، راح نرد عليك بأقرب وقت.'));
+      await send(L(t('✅ وصلت رسالتك، راح نرد عليك بأقرب وقت.')));
       return;
     }
 
     if (cmd === '/id') {
-      await send(lines(`🆔 الآيدي مالتك: ${fromId}`, isAdmin ? '✅ إنت أدمن' : 'حطه بـADMIN_IDS إذا تريد تصير أدمن'));
+      await send(L(t('🆔 الآيدي مالتك: {id}', { id: fromId }), isAdmin ? t('✅ إنت أدمن') : t('حطه بـADMIN_IDS إذا تريد تصير أدمن')));
       return;
     }
 
     if (cmd === '/help') {
-      const base = ['/play — سوّي غرفة لعب', '/pass — الرويال باس المميز بالنجوم', '/top — المتصدرين', '/sounds — كم صوت شغّال باللعبة', '/paysupport — مساعدة بالدفع', '/terms — الشروط', '/id — الآيدي مالتك'];
+      const base = [
+        t('/play — سوّي غرفة لعب'),
+        t('/pass — الرويال باس المميز بالنجوم'),
+        t('/top — المتصدرين'),
+        t('/sounds — كم صوت شغّال باللعبة'),
+        t('/paysupport — مساعدة بالدفع'),
+        t('/terms — الشروط'),
+        t('/id — الآيدي مالتك'),
+      ];
       const adm = isAdmin
         ? [
             '',
@@ -262,13 +324,27 @@ export async function handleUpdate(update, deps) {
             '/sounds — عدد الأصوات وكل الأصوات بأزرار (تعطيل وحذف)',
             '/title رقم اسم — تغيير الاسم',
             '/refund رقم_العملية — يرجّع نجوم دفعة ويسحب اللي انطته',
+            '/newusers — تشغيل/إطفاء إشعار كل لاعب جديد',
           ]
         : [];
-      await send(lines(...base, ...adm));
+      await send(L(...base) + (adm.length ? '\n' + lines(...adm) : ''));
       return;
     }
 
     // ---------- أوامر الأدمن
+    if (isAdmin && (cmd === '/newusers' || cmd === '/notify')) {
+      const cur = await hub.joinStats();
+      const on = /^(on|1|تشغيل|شغل)$/i.test(arg) ? true : /^(off|0|اطفاء|إطفاء|طفي)$/i.test(arg) ? false : !cur.on;
+      const s = await hub.setJoinNotify(on);
+      await send(
+        lines(
+          s.on ? '🔔 إشعار كل لاعب جديد: شغّال' : '🔕 إشعار كل لاعب جديد: مطفي',
+          `👥 كل اللاعبين: ${s.total} — جدد آخر 24 ساعة: ${s.today}`,
+          'تبدّله بنفس الأمر: /newusers',
+        ),
+      );
+      return;
+    }
     if (isAdmin && cmd === '/sounds') {
       const menu = await soundsMenu(hub, 0);
       await send(menu.text, { reply_markup: menu.reply_markup });
@@ -276,7 +352,7 @@ export async function handleUpdate(update, deps) {
     }
     if (cmd === '/sounds') {
       const c = await hub.soundCounts();
-      await send(lines(`🎵 الأصوات الفعّالة باللعبة: ${c.active}`));
+      await send(L(t('🎵 الأصوات الفعّالة باللعبة: {n}', { n: c.active })));
       return;
     }
     if (isAdmin && cmd === '/del') {
@@ -309,7 +385,7 @@ export async function handleUpdate(update, deps) {
     // ---------- إضافة صوت (الأدمن بالخاص)
     const media = mediaOf(msg);
     if (media && isPrivate) {
-      if (!isAdmin) return void (await send(lines('بس الأدمن يكدر يضيف أصوات 🙂')));
+      if (!isAdmin) return void (await send(L(t('بس الأدمن يكدر يضيف أصوات 🙂'))));
       if (media.size && media.size > 20 * 1024 * 1024) return void (await send(lines('❌ الملف أكبر من 20MB — تيليجرام ما يسمح للبوت ينزّله')));
       const title = (msg.caption || media.title || '').trim().slice(0, 40);
       const id = await hub.addSound({ title, file_id: media.file_id, kind: media.kind, dur: media.dur || 0, added_by: fromId });
@@ -336,10 +412,12 @@ export async function handleUpdate(update, deps) {
     }
 
     if (isPrivate && text && !text.startsWith('/')) {
-      await send(lines('اضغط الزر وابدي اللعب 👇'), { reply_markup: { inline_keyboard: [[playButton('')]] } });
+      await send(L(t('اضغط الزر وابدي اللعب 👇')), { reply_markup: { inline_keyboard: [[playButton('')]] } });
     }
   } catch (e) {
     console.log('bot error', e && e.message);
+  } finally {
+    if (joined) await joined;
   }
 }
 
@@ -348,7 +426,8 @@ async function handleCallback(q, deps) {
   const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
   const answer = (text) => tg.call('answerCallbackQuery', { callback_query_id: q.id, text: text || '' }).catch(() => null);
   const fromId = String((q.from && q.from.id) || '');
-  if (!adminIds(env).includes(fromId)) return answer('بس الأدمن يكدر يعدّل الأصوات');
+  const t = (s) => tr(langOf(q.from), s);
+  if (!adminIds(env).includes(fromId)) return answer(t('بس الأدمن يكدر يعدّل الأصوات'));
   const [act, key, pg] = String(q.data || '').split('|');
   const page = Number(pg) || 0;
   let note = '';
@@ -396,11 +475,17 @@ function packName(sku, qty) {
   return 'باس مميز + 10 لفلات';
 }
 
+/** لغة اللاعب للدفع: اللي محفوظة من اللعبة، وإلا لغة تيليجرام */
+async function payLang(hub, from) {
+  const info = await hub.botInfo('t' + ((from && from.id) || '')).catch(() => null);
+  return langOf(from, info && info.lang);
+}
+
 /** لازم نرد خلال 10 ثواني وإلا تيليجرام يلغي الدفع */
 async function handlePreCheckout(q, deps) {
   const { env, hub } = deps;
   const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
-  const lang = langOf(q.from);
+  const lang = await payLang(hub, q.from);
   const p = parsePassPayload(q.invoice_payload) || parsePackPayload(q.invoice_payload);
   let error = '';
   if (!p || p.uid !== 't' + q.from.id) error = 'الفاتورة مو إلك — افتحها من حسابك';
@@ -421,10 +506,10 @@ async function handlePaid(msg, deps) {
   const { env, hub } = deps;
   const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
   const sp = msg.successful_payment;
-  const lang = langOf(msg.from);
-  const t = (s) => tr(lang, s);
-  // الروسي يمين لليسار لا: بدون علامة RLM
-  const out = lang === 'ru' ? (...l) => l.filter((x) => x !== '').join('\n') : lines;
+  const lang = await payLang(hub, msg.from);
+  const t = (s, vars) => tr(lang, s, vars);
+  // الروسي والإنكليزي من اليسار: بدون علامة RLM
+  const out = (...l) => linesFor(lang)(...l.filter((x) => x !== ''));
   const charge = sp.telegram_payment_charge_id;
   const pass = parsePassPayload(sp.invoice_payload);
   const pack = pass ? null : parsePackPayload(sp.invoice_payload);
@@ -436,10 +521,10 @@ async function handlePaid(msg, deps) {
     r = await hub.grantPremium(p.uid, p.season, charge, sp.total_amount);
     const got = (r.rewards || []).length;
     text = out(
-      r.already ? t('✅ الباس المميز مفعّل عندك') : t('🎉 تفعّل الرويال باس المميز للموسم {s}!').replace('{s}', r.season || p.season),
-      got ? t('🎁 استلمت {n} جوائز من اللفلات اللي وصلتها').replace('{n}', got) : '',
-      t('صار عندك {n} لفل بجوائز أقوى — العب وكمّل 💪').replace('{n}', PASS.premiumMax),
-      t('رقم العملية (للدعم): {c}').replace('{c}', charge),
+      r.already ? t('✅ الباس المميز مفعّل عندك') : t('🎉 تفعّل الرويال باس المميز للموسم {s}!', { s: r.season || p.season }),
+      got ? t('🎁 استلمت {n} جوائز من اللفلات اللي وصلتها', { n: got }) : '',
+      t('صار عندك {n} لفل بجوائز أقوى — العب وكمّل 💪', { n: PASS.premiumMax }),
+      t('رقم العملية (للدعم): {c}', { c: charge }),
     );
   } else {
     r = await hub.grantPack(p.uid, p.sku, p.season, charge, sp.total_amount);
@@ -448,10 +533,10 @@ async function handlePaid(msg, deps) {
     const got = r.pass ? (r.pass.rewards || []).length : 0;
     let head;
     if (r.already) head = t('✅ هاي الدفعة انحسبت من قبل');
-    else if (def.kind === 'mics') head = t('🎤 انضاف لرصيدك {n} مايك!').replace('{n}', Number(def.mics).toLocaleString('en-US'));
-    else if (def.kind === 'levels') head = t('🎖️ تقدّم الباس {n} لفل — صرت لفل {to}!').replace('{n}', def.levels).replace('{to}', to);
-    else head = t('🎉 تفعّل الباس المميز ووياه 10 لفلات — صرت لفل {to}!').replace('{to}', to);
-    text = out(head, got ? t('🎁 استلمت {n} جوائز من اللفلات اللي وصلتها').replace('{n}', got) : '', t('رقم العملية (للدعم): {c}').replace('{c}', charge));
+    else if (def.kind === 'mics') head = t('🎤 انضاف لرصيدك {n} مايك!', { n: Number(def.mics).toLocaleString('en-US') });
+    else if (def.kind === 'levels') head = t('🎖️ تقدّم الباس {n} لفل — صرت لفل {to}!', { n: def.levels, to });
+    else head = t('🎉 تفعّل الباس المميز ووياه 10 لفلات — صرت لفل {to}!', { to });
+    text = out(head, got ? t('🎁 استلمت {n} جوائز من اللفلات اللي وصلتها', { n: got }) : '', t('رقم العملية (للدعم): {c}', { c: charge }));
   }
   await tg.call('sendMessage', { chat_id: msg.chat.id, text }).catch(() => null);
   if (r.already) return;

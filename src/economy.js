@@ -40,6 +40,7 @@ export class Economy {
       'pass_prem INTEGER DEFAULT 0',
       'pass_got INTEGER DEFAULT 0',
       'pass_got_p INTEGER DEFAULT 0',
+      "lang TEXT DEFAULT ''",
     ];
     for (const c of cols) {
       try {
@@ -65,16 +66,25 @@ export class Economy {
 
   /* ============================================================ أساسيات */
 
-  ensureUser(uid, name = '', photo = '') {
+  ensureUser(uid, name = '', photo = '', lang = '') {
+    // lang: لغة اللعبة عند اللاعب (حتى البوت يحچي وياه بنفسها)
+    const lg = ['ar', 'ru', 'en'].includes(lang) ? lang : '';
     this.sql.exec(
-      `INSERT INTO users (id, name, photo, updated) VALUES (?, ?, ?, ?)
+      `INSERT INTO users (id, name, photo, updated, lang) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE users.name END,
-         photo = CASE WHEN excluded.photo <> '' THEN excluded.photo ELSE users.photo END`,
+         photo = CASE WHEN excluded.photo <> '' THEN excluded.photo ELSE users.photo END,
+         lang = CASE WHEN excluded.lang <> '' THEN excluded.lang ELSE users.lang END`,
       uid,
       name || '',
       photo || '',
       Date.now(),
+      lg,
     );
+  }
+
+  langOf(uid) {
+    const r = this.sql.exec('SELECT lang FROM users WHERE id = ?', uid).toArray()[0];
+    return (r && r.lang) || '';
   }
 
   row(uid) {

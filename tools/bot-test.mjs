@@ -39,8 +39,9 @@ const lastCall = async (method) => {
   return c[c.length - 1] && c[c.length - 1].payload;
 };
 const health = async () => (await fetch(BASE + '/api/health')).json();
+// إشعارات «لاعب جديد» للأدمن تمشي بالخلفية: ما نحسبها رد على الرسالة
 const lastSend = async () => {
-  const c = (await calls()).filter((x) => x.method === 'sendMessage');
+  const c = (await calls()).filter((x) => x.method === 'sendMessage' && !/لاعب جديد/.test(String(x.payload.text || '')));
   return c[c.length - 1] && c[c.length - 1].payload;
 };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -47,6 +47,7 @@ export class Room extends DurableObject {
       /* بيئات قديمة */
     }
     this.lastReact = new Map();
+    this.mmSig = '';
   }
 
   ensureTables() {
@@ -80,6 +81,8 @@ export class Room extends DurableObject {
       finals: null,
       chatId: null,
       emptySince: 0,
+      pub: false, // غرفة عامة (لعب عشوائي ويا ناس ما تعرفهم)
+      autoAt: 0, // الغرفة العامة تبدي لوحدها بهالوقت
     };
   }
 
@@ -95,15 +98,17 @@ export class Room extends DurableObject {
 
   /* ============================================================ RPC من العامل */
 
-  /** حجز الغرفة لرمز جديد. يرفض إذا فيها ناس متصلين. */
-  async claim({ code, chatId = null } = {}) {
+  /** حجز الغرفة لرمز جديد. يرفض إذا فيها ناس متصلين. pub = غرفة عامة للعب العشوائي */
+  async claim({ code, chatId = null, pub = false } = {}) {
     const live = this.ctx.getWebSockets().length > 0;
     if (this.st && live) return false;
     this.ensureTables();
     this.ctx.storage.sql.exec('DELETE FROM takes');
     this.st = this.fresh(code);
     this.st.chatId = chatId;
+    this.st.pub = !!pub;
     this.st.emptySince = Date.now();
+    this.mmSig = '';
     await this.save();
     await this.reschedule();
     return true;
@@ -111,7 +116,66 @@ export class Room extends DurableObject {
 
   async info() {
     if (!this.st) return { exists: false };
-    return { exists: true, phase: this.st.phase, players: this.st.order.length, max: MAX_PLAYERS };
+    return { exists: true, phase: this.st.phase, players: this.st.order.length, max: MAX_PLAYERS, pub: !!this.st.pub };
+  }
+
+  /* ============================================================ اللعب العشوائي */
+
+  /**
+   * الغرفة العامة تبدي لوحدها: من يصيرون اثنين يبدي عد تنازلي، وكل واحد يدخل ياخذ كم ثانية يتهيأ،
+   * وإذا امتلت تبدي بسرعة. أقل من اثنين = ننتظر.
+   */
+  updateAuto(joined = false, exclude = null) {
+    const st = this.st;
+    if (!st || !st.pub) return;
+    if (st.phase !== 'lobby') {
+      st.autoAt = 0;
+      return;
+    }
+    const n = this.connected(exclude).length;
+    const now = Date.now();
+    if (n < 2) st.autoAt = 0;
+    else if (n >= MAX_PLAYERS) st.autoAt = Math.min(st.autoAt || Infinity, now + T.MM_FULL);
+    else if (!st.autoAt) st.autoAt = now + T.MM_WAIT;
+    else if (joined) st.autoAt = Math.max(st.autoAt, now + T.MM_JOIN);
+  }
+
+  /** نبلّغ الـHub بحالة الغرفة العامة (بس إذا تغيّرت) حتى يوزّع عليها لاعبين */
+  async mmSync() {
+    const st = this.st;
+    if (!st || !st.pub) return;
+    const on = this.connected().length;
+    const n = on ? st.order.length : 0;
+    const phase = st.phase === 'lobby' ? 'lobby' : 'game';
+    const sig = `${n}|${phase}|${st.autoAt || 0}`;
+    if (sig === this.mmSig) return;
+    this.mmSig = sig;
+    try {
+      await this.hub().mmReport(st.code, { n, phase, startsAt: st.autoAt || 0 });
+    } catch (e) {
+      this.mmSig = '';
+      console.log('mmReport failed', e && e.message);
+    }
+  }
+
+  /** بعد نهاية لعبة عامة: ترجع غرفة انتظار باللي باقين، وتنفتح لناس جدد */
+  backToLobby() {
+    const st = this.st;
+    const on = new Set(this.connected());
+    for (const u of [...st.order]) if (!on.has(u)) this.removePlayer(u);
+    for (const u of st.order) {
+      const p = st.players[u];
+      p.score = 0;
+      p.mult = 1;
+      p.bonus = 0;
+    }
+    st.phase = 'lobby';
+    st.round = 0;
+    st.finals = null;
+    st.wheel = {};
+    st.t = { phaseAt: Date.now() };
+    st.autoAt = 0;
+    this.updateAuto(true);
   }
 
   /* ============================================================ الاتصال */
@@ -153,12 +217,14 @@ export class Room extends DurableObject {
       }
     }
     this.st.emptySince = 0;
+    this.updateAuto(true);
     if (!user.guest) await this.applyLook(user.uid);
     await this.save();
     server.send(JSON.stringify({ t: 'hello', you: user.uid, s: Date.now() }));
     this.broadcast();
     if (this.st.phase === 'analyze' || this.st.phase === 'playback') this.sendTakes(server);
     await this.reschedule();
+    await this.mmSync();
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -251,6 +317,7 @@ export class Room extends DurableObject {
     p.leftAt = Date.now();
     if (this.st.host === a.uid) this.pickHost(ws);
     if (this.connected(ws).length === 0) this.st.emptySince = Date.now();
+    this.updateAuto(false, ws);
     await this.save();
     this.broadcast();
     await this.advance();
@@ -362,6 +429,7 @@ export class Room extends DurableObject {
           /* */
         }
         if (this.connected().length === 0) st.emptySince = Date.now();
+        this.updateAuto(false);
         await this.save();
         this.broadcast();
         await this.advance();
@@ -486,12 +554,15 @@ export class Room extends DurableObject {
     st.sabNext = {};
     st.swapNext = [];
     st.finals = null;
+    st.autoAt = 0;
     this.ensureTables();
     this.ctx.storage.sql.exec('DELETE FROM takes');
     this.nextRound();
     await this.save();
     this.broadcast();
     await this.reschedule();
+    // الغرفة العامة ما تنعرض للي يدورون وهي بنص لعبة
+    await this.mmSync();
   }
 
   nextRound() {
@@ -586,8 +657,11 @@ export class Room extends DurableObject {
       }
       const sab = (st.sabNow[src] || []).map((s) => s.type);
       const dur = Math.round(playbackSeconds(st.takes[src], sab) * 1000);
-      st.play.push({ uid, src, at, dur, walk: T.WALK });
-      at += T.WALK + dur + T.REVEAL + T.BACK;
+      // المضاعف ونقاط العجلة تنضاف للدرجة قدّام الكل خطوة خطوة: نطوّل العرض بقدرها
+      const r = st.results[uid] || {};
+      const reveal = T.REVEAL + ((r.mult || 1) > 1 ? T.BONUS_STEP : 0) + ((r.bonus || 0) > 0 ? T.BONUS_STEP : 0);
+      st.play.push({ uid, src, at, dur, walk: T.WALK, reveal });
+      at += T.WALK + dur + reveal + T.BACK;
     }
     st.phase = 'playback';
     st.t = { ...st.t, phaseAt: now, playEnd: at + 400 };
@@ -663,7 +737,8 @@ export class Room extends DurableObject {
     });
     st.finals = ranking;
     st.phase = 'final';
-    st.t = { phaseAt: now };
+    // العامة: بعد شوية ترجع غرفة انتظار وتبدي لعبة جديدة باللي باقين (ويدخلون ناس جدد)
+    st.t = st.pub ? { phaseAt: now, againAt: now + T.MM_AGAIN } : { phaseAt: now };
     st.wheel = {};
     const winner = ranking[0] && ranking[0].score > 0 ? ranking[0].uid : null;
     {
@@ -697,6 +772,23 @@ export class Room extends DurableObject {
     const now = Date.now();
     const on = this.connected();
     switch (st.phase) {
+      case 'lobby': {
+        // الغرفة العامة تبدي لوحدها من يخلص العد
+        if (!st.pub || !st.autoAt || now < st.autoAt) return false;
+        if (on.length < 2) {
+          st.autoAt = 0;
+          return false;
+        }
+        const game = st.gameNo;
+        await this.startGame();
+        if (st.gameNo === game) st.autoAt = 0; // ما بدت (ماكو أصوات)
+        return st.gameNo !== game;
+      }
+      case 'final': {
+        if (!st.pub || !st.t.againAt || now < st.t.againAt) return false;
+        this.backToLobby();
+        return true;
+      }
       case 'intro': {
         const all = on.length > 0 && on.every((u) => st.loaded[u]);
         if (now >= st.t.introEnd && (all || now >= st.t.loadDeadline)) {
@@ -788,6 +880,7 @@ export class Room extends DurableObject {
         changed = true;
       }
     }
+    if (changed) this.updateAuto(false);
     return changed;
   }
 
@@ -805,6 +898,7 @@ export class Room extends DurableObject {
       this.broadcast();
     }
     await this.reschedule();
+    await this.mmSync();
   }
 
   async alarm() {
@@ -850,6 +944,8 @@ export class Room extends DurableObject {
           const p = st.players[u];
           if (!p.on && p.leftAt) times.push(p.leftAt + T.LOBBY_DROP);
         }
+        if (st.pub && st.phase === 'lobby' && st.autoAt) times.push(st.autoAt);
+        if (st.pub && st.phase === 'final' && t.againAt) times.push(t.againAt);
     }
     if (this.connected().length === 0 && st.emptySince) times.push(st.emptySince + T.ROOM_TTL);
     const future = times.filter((x) => Number.isFinite(x) && x > now - 5);
@@ -905,6 +1001,8 @@ export class Room extends DurableObject {
       // كل لاعب يشوف مكافأته بس
       finals: st.phase === 'final' ? (st.finals || []).map((r) => (r.uid === forUid ? r : { ...r, reward: undefined })) : null,
       chat: !!st.chatId,
+      pub: !!st.pub,
+      autoAt: st.autoAt || 0,
     };
   }
 

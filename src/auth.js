@@ -63,6 +63,16 @@ export async function verifyInitData(initData, botToken, maxAgeSec = 86400) {
     guest: false,
     startParam: params.get('start_param') || '',
     chatInstance: params.get('chat_instance') || '',
+    chatType: params.get('chat_type') || '',
+    // لإشعار «لاعب جديد» للأدمن
+    tg: {
+      id: user.id,
+      first_name: String(user.first_name || '').slice(0, 64),
+      last_name: String(user.last_name || '').slice(0, 64),
+      username: String(user.username || '').slice(0, 40),
+      language_code: String(user.language_code || '').slice(0, 12),
+      is_premium: !!user.is_premium,
+    },
   };
 }
 

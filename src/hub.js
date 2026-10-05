@@ -7,6 +7,7 @@ import { fetchLibrarySound } from './myinstants.js';
 import { Tg, adminIds } from './telegram.js';
 import { webhookSecret, toHex } from './auth.js';
 import { Economy } from './economy.js';
+import { MAX_PLAYERS } from '../public/js/shared.js';
 
 const LIB_MAX_TRIES = 3;
 
@@ -35,6 +36,19 @@ export class Hub extends DurableObject {
     this.sql.exec('CREATE TABLE IF NOT EXISTS lib_fail (slug TEXT PRIMARY KEY, err TEXT, tries INTEGER DEFAULT 0, at INTEGER)');
     // المايكات واللفلات والمتجر والباس والإعلانات
     this.eco = new Economy(this.sql);
+    // أول مرة نشوف كل لاعب تيليجرام (إشعار «لاعب جديد» للأدمن)
+    this.sql.exec('CREATE TABLE IF NOT EXISTS joins (uid TEXT PRIMARY KEY, at INTEGER, src TEXT)');
+    if (!this.getKV('joins_seeded')) {
+      // اللاعبين القدامى ما ينحسبون جدد بعد التحديث
+      this.sql.exec("INSERT OR IGNORE INTO joins (uid, at, src) SELECT id, COALESCE(updated, 0), 'old' FROM users WHERE id LIKE 't%'");
+      this.setKV('joins_seeded', '1');
+    }
+    // اللعب العشوائي: غرف عامة بغرفة الانتظار وبيها مكان
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS mm (
+        code TEXT PRIMARY KEY, n INTEGER DEFAULT 0, phase TEXT DEFAULT 'lobby', ready INTEGER DEFAULT 0,
+        held INTEGER DEFAULT 0, heldAt INTEGER DEFAULT 0, startsAt INTEGER DEFAULT 0, created INTEGER, at INTEGER)`,
+    );
   }
 
   /* ---------------- kv */
@@ -66,9 +80,164 @@ export class Hub extends DurableObject {
     return this.eco.recordGame(results, winner, gkey);
   }
 
+  /* ---------------- لاعبين جدد (إشعار للأدمن) */
+
+  /**
+   * أول مرة نشوف لاعب تيليجرام (من البوت أو من اللعبة): ينحفظ ويوصل للأدمن إشعار بمعلوماته.
+   * u: {id, first_name, last_name, username, language_code, is_premium, src}
+   */
+  async join(u) {
+    if (!u || !u.id) return { isNew: false };
+    const uid = 't' + Number(u.id);
+    const now = Date.now();
+    const r = this.sql.exec('INSERT OR IGNORE INTO joins (uid, at, src) VALUES (?, ?, ?)', uid, now, String(u.src || '').slice(0, 80));
+    if (!r.rowsWritten) return { isNew: false };
+    const n = this.sql.exec('SELECT COUNT(*) AS c FROM joins').one().c;
+    if (this.getKV('notify_join') !== '0') await this.notifyJoin(u, n, now).catch((e) => console.log('notifyJoin', e && e.message));
+    return { isNew: true, n };
+  }
+
+  joinStats() {
+    const day = Date.now() - 86400000;
+    return {
+      total: this.sql.exec('SELECT COUNT(*) AS c FROM joins').one().c,
+      today: this.sql.exec("SELECT COUNT(*) AS c FROM joins WHERE at >= ? AND src <> 'old'", day).one().c,
+      on: this.getKV('notify_join') !== '0',
+    };
+  }
+
+  setJoinNotify(on) {
+    this.setKV('notify_join', on ? '1' : '0');
+    return this.joinStats();
+  }
+
+  async notifyJoin(u, n, now) {
+    const token = (this.env.TELEGRAM_BOT_TOKEN || '').trim();
+    const admins = adminIds(this.env);
+    if (!token || !admins.length) return;
+    // ضد السبام: لحد 12 إشعار بالدقيقة، والزايد ينذكر بأول إشعار بالدقيقة اللي بعدها
+    const win = JSON.parse(this.getKV('join_win') || 'null') || { t: 0, n: 0, skip: 0 };
+    let carried = 0;
+    if (now - win.t >= 60000) {
+      carried = win.skip || 0;
+      win.t = now;
+      win.n = 0;
+      win.skip = 0;
+    }
+    if (win.n >= 12) {
+      win.skip = (win.skip || 0) + 1;
+      this.setKV('join_win', JSON.stringify(win));
+      return;
+    }
+    win.n += 1;
+    this.setKV('join_win', JSON.stringify(win));
+    const h = (s) => String(s || '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+    const name = [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || 'بدون اسم';
+    let when = '';
+    try {
+      when = new Intl.DateTimeFormat('en-GB', {
+        timeZone: String(this.env.ADMIN_TZ || 'Asia/Baghdad').trim(),
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(new Date(now));
+    } catch {
+      when = new Date(now).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+    }
+    const text = [
+      `🆕 لاعب جديد — رقم ${n}`,
+      `👤 <a href="tg://user?id=${Number(u.id)}">${h(name)}</a>${u.username ? ' · @' + h(u.username) : ''}`,
+      `🆔 <code>${Number(u.id)}</code>`,
+      `🌐 اللغة: ${h(u.language_code) || '—'}${u.is_premium ? ' · ⭐ بريميوم' : ''}`,
+      `📲 دخل من: ${h(u.src) || '—'}`,
+      `🕒 ${when}`,
+      carried ? `➕ وقبله ${carried} لاعب جديد ما وصلك إشعارهم (زحمة)` : '',
+    ]
+      .filter(Boolean)
+      .map((l) => '‏' + l)
+      .join('\n');
+    const tg = new Tg(token, this.env.TG_API_BASE);
+    for (const id of admins) await tg.call('sendMessage', { chat_id: id, text, parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => null);
+  }
+
+  /* ---------------- اللعب العشوائي: غرف عامة يدخلها أي واحد */
+
+  /**
+   * يلگي غرفة عامة بغرفة الانتظار وبيها مكان (الأملى أول حتى اللعبة تبدي أسرع).
+   * exclude: غرف ما زبطت ويا اللاعب هسه، bad: غرفة طلعت مو موجودة (تنشال).
+   * يرجع {code} أو {code: null} = سوّوا غرفة جديدة.
+   */
+  quickRoom(exclude = [], bad = '') {
+    const now = Date.now();
+    if (bad) this.sql.exec('DELETE FROM mm WHERE code = ?', String(bad));
+    this.sql.exec('DELETE FROM mm WHERE at < ?', now - 30 * 60 * 1000);
+    const ex = new Set((exclude || []).map(String));
+    const rows = this.sql
+      .exec("SELECT code, n, held, heldAt, startsAt FROM mm WHERE ready = 1 AND phase = 'lobby' ORDER BY n DESC, created ASC LIMIT 30")
+      .toArray();
+    for (const r of rows) {
+      if (ex.has(r.code)) continue;
+      const held = r.heldAt > now - 8000 ? r.held : 0;
+      if (r.n + held >= MAX_PLAYERS) continue;
+      if (r.startsAt && r.startsAt - now < 2500) continue; // على وشك تبدي
+      this.sql.exec('UPDATE mm SET held = ?, heldAt = ? WHERE code = ?', held + 1, now, r.code);
+      return { code: r.code };
+    }
+    return { code: null };
+  }
+
+  /** غرفة عامة جديدة انحجزت للاعب (هو أول واحد بيها) */
+  mmAdd(code) {
+    const now = Date.now();
+    this.sql.exec(
+      "INSERT OR REPLACE INTO mm (code, n, phase, ready, held, heldAt, startsAt, created, at) VALUES (?, 0, 'lobby', 1, 1, ?, 0, ?, ?)",
+      String(code),
+      now,
+      now,
+      now,
+    );
+    return true;
+  }
+
+  /** الغرفة العامة تبلّغ حالتها. n = 0 أو phase = gone: تنشال من القائمة */
+  mmReport(code, { n = 0, phase = 'lobby', startsAt = 0 } = {}) {
+    const now = Date.now();
+    if (!n || phase === 'gone') {
+      this.sql.exec('DELETE FROM mm WHERE code = ?', String(code));
+      return true;
+    }
+    // كل لاعب دخل فعلًا يفك حجز واحد
+    this.sql.exec(
+      `INSERT INTO mm (code, n, phase, ready, held, heldAt, startsAt, created, at) VALUES (?, ?, ?, 1, 0, 0, ?, ?, ?)
+       ON CONFLICT(code) DO UPDATE SET held = MAX(0, mm.held - MAX(0, excluded.n - mm.n)), n = excluded.n, phase = excluded.phase,
+         ready = 1, startsAt = excluded.startsAt, at = excluded.at`,
+      String(code),
+      Number(n) || 0,
+      String(phase),
+      Number(startsAt) || 0,
+      now,
+      now,
+    );
+    return true;
+  }
+
+  /** كم واحد ينتظر بالغرف العامة هسه */
+  mmStats() {
+    const r = this.sql.exec("SELECT COUNT(*) AS rooms, COALESCE(SUM(n), 0) AS waiting FROM mm WHERE phase = 'lobby' AND at > ?", Date.now() - 30 * 60 * 1000).one();
+    return { rooms: r.rooms, waiting: r.waiting };
+  }
+
+  /** للبوت: اسم البوت ولغة اللاعب باللعبة (إذا فتحها قبل) */
+  botInfo(uid) {
+    return { bot: this.getKV('bot'), lang: uid ? this.eco.langOf(uid) : '' };
+  }
+
   /* ---------------- الاقتصاد (RPC للعامل والغرف) */
-  profile(uid, name = '', photo = '') {
-    this.eco.ensureUser(uid, name, photo);
+  profile(uid, name = '', photo = '', lang = '') {
+    this.eco.ensureUser(uid, name, photo, lang);
     return this.eco.profile(uid);
   }
   buy(uid, item) {
@@ -398,7 +567,7 @@ export class Hub extends DurableObject {
     const token = (this.env.TELEGRAM_BOT_TOKEN || '').trim();
     if (!token) return { ok: false, reason: 'TELEGRAM_BOT_TOKEN غير مضبوط' };
     const digest = toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))).slice(0, 12);
-    const stamp = `${origin}|${digest}|v6`;
+    const stamp = `${origin}|${digest}|v7`;
     if (!force && this.getKV('webhook') === stamp) return { ok: true, cached: true, bot: this.getKV('bot') };
     const tg = new Tg(token, this.env.TG_API_BASE);
     try {
@@ -419,6 +588,30 @@ export class Hub extends DurableObject {
           { command: 'help', description: 'المساعدة' },
         ],
       });
+      // نفس الأوامر بلغة تطبيق اللاعب (تيليجرام يختار حسب لغته)
+      const ru = [
+        { command: 'start', description: 'Начать' },
+        { command: 'play', description: 'Создать комнату' },
+        { command: 'pass', description: 'Премиум-пропуск ⭐' },
+        { command: 'top', description: 'Лидеры' },
+        { command: 'sounds', description: 'Сколько звуков в игре' },
+        { command: 'help', description: 'Помощь' },
+      ];
+      const en = [
+        { command: 'start', description: 'Start' },
+        { command: 'play', description: 'Create a game room' },
+        { command: 'pass', description: 'Premium Royal Pass ⭐' },
+        { command: 'top', description: 'Leaderboard' },
+        { command: 'sounds', description: 'Active sounds in the game' },
+        { command: 'help', description: 'Help' },
+      ];
+      for (const [language_code, commands] of [
+        ['ru', ru],
+        ['uk', ru],
+        ['en', en],
+      ]) {
+        await tg.call('setMyCommands', { commands, language_code }).catch(() => null);
+      }
       await tg
         .call('setChatMenuButton', { menu_button: { type: 'web_app', text: '🎮 العب', web_app: { url: origin + '/' } } })
         .catch(() => null);

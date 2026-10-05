@@ -489,7 +489,7 @@ await shot(page, 'menu-fps');
 
 if (PLAY) {
   // ---------------- لعبة كاملة (وحدي) → مكافآت النهاية + إعلان كامل الشاشة + ضاعف
-  await tap(page, '.menu-btns .btn.pink');
+  await tap(page, '.menu-btns .btn.friends');
   await page.waitForSelector('#lobbyBar .room-code b', { timeout: 15000 });
   await page.waitForTimeout(2500);
   await clearOfHeader(page, '#exitBtn, #setBtn, #lobbyBar button, #lobbyBar .room-code', 'أزرار الغرفة');
@@ -571,7 +571,7 @@ await page.waitForSelector('.panel.settings');
 await Promise.all([page.waitForEvent('load', { timeout: 20000 }), tap(page, '.seg-btn[data-v="ru"]')]);
 await page.waitForTimeout(3000);
 const ru = await page.evaluate(() => ({ dir: document.documentElement.dir, lang: document.documentElement.lang, btn: (document.querySelector('.menu-btns .btn.pink') || {}).textContent, title: document.title }));
-check(ru.dir === 'ltr' && ru.lang === 'ru' && /Играть с друзьями/.test(ru.btn || ''), `الروسي: ${JSON.stringify(ru)}`);
+check(ru.dir === 'ltr' && ru.lang === 'ru' && /Случайная игра/.test(ru.btn || ''), `الروسي: ${JSON.stringify(ru)}`);
 await clearOfHeader(page, '.menu-side .side-btn, .menu-btns button, .menu-top button, .profile-chip', 'أزرار القائمة (روسي)');
 await shot(page, 'ru-menu');
 await tap(page, '.menu-side .side-btn', 0);
@@ -603,7 +603,7 @@ await page.waitForTimeout(700);
 await shot(page, 'ru-help');
 await tap(page, '.panel.help .xbtn');
 await page.waitForTimeout(700);
-await tap(page, '.menu-btns .btn.pink');
+await tap(page, '.menu-btns .btn.friends');
 await page.waitForSelector('#lobbyBar .room-code b', { timeout: 15000 });
 await page.waitForTimeout(2000);
 await shot(page, 'ru-lobby');
