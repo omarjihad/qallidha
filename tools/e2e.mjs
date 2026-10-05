@@ -169,7 +169,7 @@ while (!done && Date.now() - t0 < 300000) {
 await tap(host, '.final-btns .btn.ghost').catch(() => null);
 await host.waitForTimeout(1500);
 await shot(host, 'menu-after');
-await tap(host, '.menu-btns .btn.teal').catch(() => null);
+await tap(host, '.menu-top .help').catch(() => null);
 await host.waitForTimeout(700);
 await shot(host, 'help');
 await tap(host, '.xbtn').catch(() => null);

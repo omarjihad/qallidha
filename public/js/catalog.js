@@ -202,3 +202,33 @@ export const ADS = {
 export function dayKey(now = Date.now()) {
   return new Date(now + 3 * 3600000).toISOString().slice(0, 10);
 }
+
+/* ------------------------------------------------------------ الشراء بنجوم تيليجرام ⭐ */
+// mics: باقات مايكات — levels: لفلات رويال باس (250 خبرة لكل لفل) — passplus: الباس المميز + 10 لفلات.
+// السعر الأساسي 20 مايك لكل نجمة، والباقات الكبيرة بيها زيادة.
+export const MICS_PER_STAR = 20;
+export const STAR_PACKS = [
+  { sku: 'mics300', kind: 'mics', mics: 300, stars: 15, icon: '🎤' },
+  { sku: 'mics700', kind: 'mics', mics: 700, stars: 30, icon: '🎤' },
+  { sku: 'mics1600', kind: 'mics', mics: 1600, stars: 60, icon: '💰' },
+  { sku: 'mics4500', kind: 'mics', mics: 4500, stars: 150, icon: '💎' },
+  { sku: 'lv1', kind: 'levels', levels: 1, stars: 10 },
+  { sku: 'lv5', kind: 'levels', levels: 5, stars: 45 },
+  { sku: 'lv10', kind: 'levels', levels: 10, stars: 80 },
+  { sku: 'lv25', kind: 'levels', levels: 25, stars: 180 },
+  { sku: 'passplus', kind: 'passplus', levels: 10, stars: 0 }, // السعر = سعر المميز + 70
+];
+export const STAR_PACK = new Map(STAR_PACKS.map((p) => [p.sku, p]));
+export const PASSPLUS_EXTRA = 70;
+
+/** سعر الباقة بالنجوم (المميز+ يتبع سعر الباس المميز) */
+export function packPrice(pack, passPrice = 99) {
+  if (!pack) return 0;
+  return pack.kind === 'passplus' ? Math.max(1, Math.round(passPrice)) + PASSPLUS_EXTRA : pack.stars;
+}
+
+/** نسبة الزيادة بباقة المايكات مقارنة بالأصغر */
+export function packBonus(pack) {
+  if (!pack || pack.kind !== 'mics') return 0;
+  return Math.round((pack.mics / (pack.stars * MICS_PER_STAR) - 1) * 100);
+}

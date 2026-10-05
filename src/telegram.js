@@ -1,8 +1,13 @@
 // عميل Telegram Bot API + منطق البوت (أوامر، إضافة الأصوات من الأدمن).
 
 import { GAME_NAME, MAX_PLAYERS, ROUNDS } from '../public/js/shared.js';
-import { seasonOf, seasonEnd, PASS } from '../public/js/catalog.js';
-import { passInvoice, passPrice } from './pass.js';
+import { seasonOf, seasonEnd, PASS, STAR_PACK, packPrice } from '../public/js/catalog.js';
+import { passInvoice, passPrice, parsePackPayload } from './pass.js';
+import RU from '../public/js/lang/ru.js';
+
+/** ترجمة رسالة عربية للروسي (نفس قاموس اللعبة) */
+const tr = (lang, s) => (lang === 'ru' && typeof RU[s] === 'string' ? RU[s] : s);
+const langOf = (from) => (/^(ru|uk|be|kk|ky|uz|tg|tk)/i.test(String((from && from.language_code) || '')) ? 'ru' : 'ar');
 
 const RLM = '‏';
 
@@ -220,7 +225,8 @@ export async function handleUpdate(update, deps) {
       await send(
         lines(
           '📜 شروط «قلّدها»:',
-          '• الرويال باس المميز يخص الموسم الحالي بس (30 يوم) ويفتح جوائز رقمية داخل اللعبة.',
+          '• الرويال باس المميز ولفلاته يخصّون الموسم الحالي بس (30 يوم) ويفتحون جوائز رقمية داخل اللعبة.',
+          '• باقات المايكات تنضاف لرصيدك داخل اللعبة وتصرفها بالمتجر.',
           '• الدفع بنجوم تيليجرام، والأشياء الرقمية ما تتحول لفلوس ولا تنباع.',
           '• إذا صارت مشكلة بالدفع اكتب /paysupport وراح نرد عليك.',
           '• نحتفظ بحق إيقاف الحسابات اللي تغش.',
@@ -255,7 +261,7 @@ export async function handleUpdate(update, deps) {
             'دز صوت / فويس / فيديو = ينضاف للعبة (الكابشن = اسمه)',
             '/sounds — عدد الأصوات وكل الأصوات بأزرار (تعطيل وحذف)',
             '/title رقم اسم — تغيير الاسم',
-            '/refund رقم_العملية — يرجّع نجوم دفعة ويلغي الباس',
+            '/refund رقم_العملية — يرجّع نجوم دفعة ويسحب اللي انطته',
           ]
         : [];
       await send(lines(...base, ...adm));
@@ -287,7 +293,7 @@ export async function handleUpdate(update, deps) {
       try {
         await tg.call('refundStarPayment', { user_id: Number(String(pay.uid).slice(1)), telegram_payment_charge_id: charge });
         await hub.refundPayment(charge);
-        await send(lines(`↩️ رجعت ${pay.stars} ⭐ وانلغى الباس المميز للاعب ${pay.uid}`));
+        await send(lines(`↩️ رجعت ${pay.stars} ⭐ للاعب ${String(pay.uid).slice(1)} وانسحب: ${packName(pay.sku || 'pass', pay.qty)}`));
       } catch (e) {
         await send(lines('❌ ما زبط الاسترجاع: ' + e.message));
       }
@@ -377,59 +383,83 @@ async function handleCallback(q, deps) {
 
 function parsePassPayload(payload) {
   const m = /^pass:(t\d+):(\d+)$/.exec(String(payload || ''));
-  return m ? { uid: m[1], season: Number(m[2]) } : null;
+  return m ? { uid: m[1], season: Number(m[2]), sku: 'pass' } : null;
+}
+
+/** اسم المشتريات للأدمن */
+function packName(sku, qty) {
+  if (sku === 'pass') return 'رويال باس مميز';
+  const p = STAR_PACK.get(sku);
+  if (!p) return sku;
+  if (p.kind === 'mics') return `${qty || p.mics} مايك`;
+  if (p.kind === 'levels') return `${qty || p.levels} لفل باس`;
+  return 'باس مميز + 10 لفلات';
 }
 
 /** لازم نرد خلال 10 ثواني وإلا تيليجرام يلغي الدفع */
 async function handlePreCheckout(q, deps) {
   const { env, hub } = deps;
   const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
-  const p = parsePassPayload(q.invoice_payload);
-  let ok = true;
+  const lang = langOf(q.from);
+  const p = parsePassPayload(q.invoice_payload) || parsePackPayload(q.invoice_payload);
   let error = '';
-  if (!p || p.uid !== 't' + q.from.id) {
-    ok = false;
-    error = 'الفاتورة مو إلك — افتح الباس من حسابك';
-  } else if (q.currency !== 'XTR' || q.total_amount !== passPrice(env)) {
-    ok = false;
-    error = 'السعر تغيّر، اطلب فاتورة جديدة';
-  } else {
-    const can = await hub.canBuyPass(p.uid, p.season).catch(() => ({ ok: false, error: 'صار خطأ، جرّب بعد شوية' }));
-    if (!can.ok) {
-      ok = false;
-      error = can.error;
+  if (!p || p.uid !== 't' + q.from.id) error = 'الفاتورة مو إلك — افتحها من حسابك';
+  else {
+    const price = p.sku === 'pass' ? passPrice(env) : packPrice(STAR_PACK.get(p.sku), passPrice(env));
+    if (q.currency !== 'XTR' || q.total_amount !== price) error = 'السعر تغيّر، اطلب فاتورة جديدة';
+    else {
+      const can = await (p.sku === 'pass' ? hub.canBuyPass(p.uid, p.season) : hub.canBuyPack(p.uid, p.sku, p.season)).catch(() => ({ ok: false, error: 'صار خطأ، جرّب بعد شوية' }));
+      if (!can.ok) error = can.error;
     }
   }
-  await tg.call('answerPreCheckoutQuery', ok ? { pre_checkout_query_id: q.id, ok: true } : { pre_checkout_query_id: q.id, ok: false, error_message: error }).catch((e) =>
-    console.log('answerPreCheckoutQuery', e.message),
-  );
+  await tg
+    .call('answerPreCheckoutQuery', error ? { pre_checkout_query_id: q.id, ok: false, error_message: tr(lang, error) } : { pre_checkout_query_id: q.id, ok: true })
+    .catch((e) => console.log('answerPreCheckoutQuery', e.message));
 }
 
 async function handlePaid(msg, deps) {
   const { env, hub } = deps;
   const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
   const sp = msg.successful_payment;
-  const p = parsePassPayload(sp.invoice_payload);
+  const lang = langOf(msg.from);
+  const t = (s) => tr(lang, s);
+  // الروسي يمين لليسار لا: بدون علامة RLM
+  const out = lang === 'ru' ? (...l) => l.filter((x) => x !== '').join('\n') : lines;
+  const charge = sp.telegram_payment_charge_id;
+  const pass = parsePassPayload(sp.invoice_payload);
+  const pack = pass ? null : parsePackPayload(sp.invoice_payload);
+  const p = pass || pack;
   if (!p) return;
-  const r = await hub.grantPremium(p.uid, p.season, sp.telegram_payment_charge_id, sp.total_amount);
-  const got = (r.rewards || []).length;
-  await tg
-    .call('sendMessage', {
-      chat_id: msg.chat.id,
-      text: lines(
-        r.already ? '✅ الباس المميز مفعّل عندك' : `🎉 تفعّل الرويال باس المميز للموسم ${r.season || p.season}!`,
-        got ? `🎁 استلمت ${got} جوائز من اللفلات اللي وصلتها` : '',
-        `صار عندك ${PASS.premiumMax} لفل بجوائز أقوى — العب وكمّل 💪`,
-        `رقم العملية (للدعم): ${sp.telegram_payment_charge_id}`,
-      ),
-    })
-    .catch(() => null);
+  let text;
+  let r;
+  if (pass) {
+    r = await hub.grantPremium(p.uid, p.season, charge, sp.total_amount);
+    const got = (r.rewards || []).length;
+    text = out(
+      r.already ? t('✅ الباس المميز مفعّل عندك') : t('🎉 تفعّل الرويال باس المميز للموسم {s}!').replace('{s}', r.season || p.season),
+      got ? t('🎁 استلمت {n} جوائز من اللفلات اللي وصلتها').replace('{n}', got) : '',
+      t('صار عندك {n} لفل بجوائز أقوى — العب وكمّل 💪').replace('{n}', PASS.premiumMax),
+      t('رقم العملية (للدعم): {c}').replace('{c}', charge),
+    );
+  } else {
+    r = await hub.grantPack(p.uid, p.sku, p.season, charge, sp.total_amount);
+    const def = STAR_PACK.get(p.sku);
+    const to = r.pass ? r.pass.to : null;
+    const got = r.pass ? (r.pass.rewards || []).length : 0;
+    let head;
+    if (r.already) head = t('✅ هاي الدفعة انحسبت من قبل');
+    else if (def.kind === 'mics') head = t('🎤 انضاف لرصيدك {n} مايك!').replace('{n}', Number(def.mics).toLocaleString('en-US'));
+    else if (def.kind === 'levels') head = t('🎖️ تقدّم الباس {n} لفل — صرت لفل {to}!').replace('{n}', def.levels).replace('{to}', to);
+    else head = t('🎉 تفعّل الباس المميز ووياه 10 لفلات — صرت لفل {to}!').replace('{to}', to);
+    text = out(head, got ? t('🎁 استلمت {n} جوائز من اللفلات اللي وصلتها').replace('{n}', got) : '', t('رقم العملية (للدعم): {c}').replace('{c}', charge));
+  }
+  await tg.call('sendMessage', { chat_id: msg.chat.id, text }).catch(() => null);
   if (r.already) return;
   const f = msg.from || {};
   const who = `${f.first_name || ''}${f.username ? ' @' + f.username : ''} (${p.uid.slice(1)})`.trim();
   for (const a of adminIds(env)) {
     await tg
-      .call('sendMessage', { chat_id: a, text: lines(`💰 دفعة ${sp.total_amount} ⭐ — رويال باس مميز`, `اللاعب: ${who}`, `للاسترجاع: /refund ${sp.telegram_payment_charge_id}`) })
+      .call('sendMessage', { chat_id: a, text: lines(`💰 دفعة ${sp.total_amount} ⭐ — ${packName(p.sku)}`, `اللاعب: ${who}`, `للاسترجاع: /refund ${charge}`) })
       .catch(() => null);
   }
 }

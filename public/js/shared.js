@@ -1,7 +1,7 @@
 // ثوابت مشتركة بين السيرفر (Worker/Durable Objects) والواجهة.
 // أي تعديل هنا يوصل للطرفين بنفس النشر.
 
-export const VERSION = '1.3.0';
+export const VERSION = '1.4.0';
 export const GAME_NAME = 'قلّدها';
 
 export const ROUNDS = 4;
@@ -46,21 +46,26 @@ export function performTimeline(listenAt, dur) {
   return { listenAt, listenEnd, reproduceAt, countAt, recAt, recDur, recEnd };
 }
 
-// قطع العجلة — بالترتيب مع عقارب الساعة ابتداءً من الأعلى
+// قطع العجلة — بالترتيب مع عقارب الساعة ابتداءً من الأعلى.
+// النقاط والمضاعفات تنحسب بالجولة الجاية (تنضاف ويا درجة تسجيلك)، والتخريب والتبديل على لاعب تختاره.
 export const WHEEL = [
-  { id: 'p10', kind: 'bonus', value: 10, label: '+10', icon: '⭐', color: '#a6dc2c', title: '+10 نقاط!', desc: 'عشر نقاط تنضاف لرصيدك' },
+  { id: 'p10', kind: 'bonus', value: 10, label: '+10', icon: '⭐', color: '#a6dc2c', title: '+10 نقاط!', desc: 'تنضاف لدرجتك بالجولة الجاية' },
+  { id: 'swap', kind: 'swap', label: 'تبديل', icon: '🔄', color: '#33c76e', title: 'تبديل الأصوات!', desc: 'اختار لاعب: بالجولة الجاية تتبادلون التسجيلات — تاخذ صوته ودرجته وياخذ صوتك' },
   { id: 'echo', kind: 'sab', sab: 'echo', label: 'صدى', icon: '🔊', color: '#2ccfc6', title: 'صدى!', desc: 'اختار لاعب: تسجيله الجاي يطلع بصدى' },
-  { id: 'p20', kind: 'bonus', value: 20, label: '+20', icon: '🌟', color: '#27a7f2', title: '+20 نقطة!', desc: 'عشرين نقطة تنضاف لرصيدك' },
+  { id: 'p20', kind: 'bonus', value: 20, label: '+20', icon: '🌟', color: '#27a7f2', title: '+20 نقطة!', desc: 'تنضاف لدرجتك بالجولة الجاية' },
   { id: 'chip', kind: 'sab', sab: 'chip', label: 'سنجاب', icon: '🐿️', color: '#3d6cf0', title: 'سنجاب!', desc: 'اختار لاعب: صوته الجاي يصير مثل السنجاب' },
   { id: 'x15', kind: 'mult', value: 1.5, label: '×1.5', icon: '✨', color: '#8b4fe6', title: '×1.5', desc: 'نقاطك بالجولة الجاية تنضرب ×1.5' },
   { id: 'chop', kind: 'sab', sab: 'chop', label: 'تقطيع', icon: '✂️', color: '#c23fe0', title: 'تقطيع!', desc: 'اختار لاعب: تسجيله الجاي يتقطّع' },
-  { id: 'p5', kind: 'bonus', value: 5, label: '+5', icon: '⭐', color: '#ff3d9e', title: '+5 نقاط', desc: 'خمس نقاط تنضاف لرصيدك' },
+  { id: 'p5', kind: 'bonus', value: 5, label: '+5', icon: '⭐', color: '#ff3d9e', title: '+5 نقاط', desc: 'تنضاف لدرجتك بالجولة الجاية' },
   { id: 'dist', kind: 'sab', sab: 'dist', label: 'تشويش', icon: '📢', color: '#ff5656', title: 'تشويش!', desc: 'اختار لاعب: تسجيله الجاي يطلع مشوّش' },
   { id: 'x2', kind: 'mult', value: 2, label: '×2', icon: '💎', color: '#ff992b', title: '×2', desc: 'نقاطك بالجولة الجاية تتضاعف' },
   { id: 'crap', kind: 'sab', sab: 'crap', label: 'ضرطة', icon: '💩', color: '#ffd23a', title: 'ضرطة!', desc: 'اختار لاعب: الكل راح يسمع ضرطة بدل تسجيله!' },
 ];
 
-export const WHEEL_WEIGHTS = { p10: 1.2, echo: 1, p20: 0.8, chip: 1, x15: 0.9, chop: 1, p5: 1.2, dist: 1, x2: 0.5, crap: 1 };
+export const WHEEL_WEIGHTS = { p10: 1.2, swap: 0.8, echo: 1, p20: 0.8, chip: 1, x15: 0.9, chop: 1, p5: 1.2, dist: 1, x2: 0.5, crap: 1 };
+
+/** قطعة تحتاج تختار لاعب (تخريب أو تبديل) — ما تنكشف للباقين لحد الإعادة */
+export const isTargeted = (seg) => !!seg && (seg.kind === 'sab' || seg.kind === 'swap');
 
 export const SAB_INFO = {
   echo: { name: 'صدى', icon: '🔊' },

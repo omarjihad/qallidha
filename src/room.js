@@ -10,6 +10,7 @@ import {
   T,
   WHEEL,
   WHEEL_WEIGHTS,
+  isTargeted,
   REACTIONS,
   TAKE_SR,
   performTimeline,
@@ -74,6 +75,8 @@ export class Room extends DurableObject {
       wheel: {},
       sabNow: {},
       sabNext: {},
+      swapNow: [],
+      swapNext: [],
       finals: null,
       chatId: null,
       emptySince: 0,
@@ -183,6 +186,7 @@ export class Room extends DurableObject {
       skin,
       score: 0,
       mult: 1,
+      bonus: 0,
       on: true,
       mic: false,
       leftAt: 0,
@@ -456,6 +460,7 @@ export class Room extends DurableObject {
     for (const u of st.order) {
       st.players[u].score = 0;
       st.players[u].mult = 1;
+      st.players[u].bonus = 0;
     }
     let sounds = [];
     try {
@@ -479,6 +484,7 @@ export class Room extends DurableObject {
     st.gameNo += 1;
     st.round = 0;
     st.sabNext = {};
+    st.swapNext = [];
     st.finals = null;
     this.ensureTables();
     this.ctx.storage.sql.exec('DELETE FROM takes');
@@ -490,11 +496,7 @@ export class Room extends DurableObject {
 
   nextRound() {
     const st = this.st;
-    // مكافآت العجلة تنضاف هسه حتى ما تنكشف قبل ما توكف العجلة
-    for (const [uid, w] of Object.entries(st.wheel || {})) {
-      const seg = w.seg != null ? WHEEL[w.seg] : null;
-      if (seg && seg.kind === 'bonus' && st.players[uid]) st.players[uid].score += seg.value;
-    }
+    // نقاط العجلة ما تنضاف هنا: تنحسب ويا درجة الجولة الجاية (beginPlayback)
     st.round += 1;
     st.cur = st.sounds[st.round - 1];
     st.loaded = {};
@@ -505,6 +507,8 @@ export class Room extends DurableObject {
     st.wheel = {};
     st.sabNow = st.sabNext || {};
     st.sabNext = {};
+    st.swapNow = st.swapNext || [];
+    st.swapNext = [];
     this.ensureTables();
     this.ctx.storage.sql.exec('DELETE FROM takes WHERE round < ?', st.round);
     const now = Date.now();
@@ -530,39 +534,59 @@ export class Room extends DurableObject {
     st.t = { ...st.t, phaseAt: now, analyzeEnd: now + T.ANALYZE_MAX };
   }
 
+  /** التبديل: لمنو يرجع كل تسجيل. {uid: صاحب التسجيل اللي ينعاد باسمه} */
+  voices() {
+    const st = this.st;
+    const voice = {};
+    for (const u of st.order) voice[u] = u;
+    for (const sw of st.swapNow || []) {
+      if (!(sw.a in voice) || !(sw.b in voice) || sw.a === sw.b) continue;
+      const x = voice[sw.a];
+      voice[sw.a] = voice[sw.b];
+      voice[sw.b] = x;
+    }
+    return voice;
+  }
+
   beginPlayback() {
     const st = this.st;
     const now = Date.now();
+    const voice = this.voices();
     st.results = {};
     for (const uid of st.order) {
       const p = st.players[uid];
-      const sab = (st.sabNow[uid] || []).map((s) => s.type);
-      if (!st.takes[uid]) {
-        st.results[uid] = { raw: 0, gained: 0, mult: p.mult || 1, none: true, sab };
-        p.mult = 1;
+      const src = voice[uid];
+      // التخريب يلحق التسجيل نفسه (حتى لو انبدل)، والمضاعف والنقاط تلحق اللاعب
+      const sab = (st.sabNow[src] || []).map((s) => s.type);
+      const mult = p.mult || 1;
+      const bonus = p.bonus || 0;
+      p.mult = 1;
+      p.bonus = 0;
+      if (!st.takes[src]) {
+        p.score += bonus;
+        st.results[uid] = { raw: 0, gained: bonus, mult, bonus, none: true, sab, src };
         continue;
       }
       const votes = Object.values(st.reports)
-        .map((r) => r[uid])
+        .map((r) => r[src])
         .filter((v) => Number.isFinite(v));
       const raw = votes.length ? Math.round(median(votes)) : 0;
-      const mult = p.mult || 1;
-      const gained = Math.round(raw * mult);
+      const gained = Math.round(raw * mult) + bonus;
       p.score += gained;
-      p.mult = 1;
-      st.results[uid] = { raw, gained, mult, sab, votes: votes.length };
+      st.results[uid] = { raw, gained, mult, bonus, sab, votes: votes.length, src };
     }
     let at = now + T.PLAY_LEAD;
     st.play = [];
     for (const uid of st.order) {
-      if (!st.takes[uid]) {
-        st.play.push({ uid, at, none: true, dur: 0 });
+      const src = voice[uid];
+      if (!st.takes[src]) {
+        st.play.push({ uid, src, at, none: true, dur: 0 });
         at += T.NOTAKE;
         continue;
       }
-      const sab = (st.sabNow[uid] || []).map((s) => s.type);
-      const dur = Math.round(playbackSeconds(st.takes[uid], sab) * 1000);
-      st.play.push({ uid, at, dur, walk: T.WALK });
+      const sab = (st.sabNow[src] || []).map((s) => s.type);
+      const dur = Math.round(playbackSeconds(st.takes[src], sab) * 1000);
+      st.play.push({ uid, src, at, dur, walk: T.WALK });
       at += T.WALK + dur + T.REVEAL + T.BACK;
     }
     st.phase = 'playback';
@@ -583,7 +607,7 @@ export class Room extends DurableObject {
     const w = st.wheel[uid];
     if (!w || w.seg != null) return;
     const solo = st.order.filter((u) => st.players[u].on).length < 2;
-    const pool = WHEEL.map((s, i) => ({ i, s, w: WHEEL_WEIGHTS[s.id] || 1 })).filter((x) => !(solo && x.s.kind === 'sab'));
+    const pool = WHEEL.map((s, i) => ({ i, s, w: WHEEL_WEIGHTS[s.id] || 1 })).filter((x) => !(solo && isTargeted(x.s)));
     const total = pool.reduce((a, x) => a + x.w, 0);
     let r = rnd() * total;
     let pick = pool[pool.length - 1];
@@ -594,11 +618,15 @@ export class Room extends DurableObject {
         break;
       }
     }
+    // للاختبار المحلي بس (ما ينحط بالنشر): WHEEL_FORCE=swap يخلي العجلة توكف على قطعة معيّنة
+    const forced = String((this.env && this.env.WHEEL_FORCE) || '').trim();
+    if (forced) pick = pool.find((x) => x.s.id === forced) || pick;
     const now = Date.now();
     w.seg = pick.i;
     w.spunAt = now;
     if (pick.s.kind === 'mult') st.players[uid].mult = pick.s.value;
-    if (pick.s.kind === 'sab') {
+    if (pick.s.kind === 'bonus') st.players[uid].bonus = (st.players[uid].bonus || 0) + pick.s.value;
+    if (isTargeted(pick.s)) {
       w.needTarget = true;
       w.targetBy = now + T.SPIN_ANIM + T.TARGET_MAX;
     } else {
@@ -615,8 +643,9 @@ export class Room extends DurableObject {
     w.target = targetUid;
     w.done = true;
     w.doneAt = Date.now();
-    const type = WHEEL[w.seg].sab;
-    (st.sabNext[targetUid] ||= []).push({ type, by: uid });
+    const seg = WHEEL[w.seg];
+    if (seg.kind === 'swap') (st.swapNext ||= []).push({ a: uid, b: targetUid });
+    else (st.sabNext[targetUid] ||= []).push({ type: seg.sab, by: uid });
   }
 
   async finish() {
@@ -845,7 +874,8 @@ export class Room extends DurableObject {
         if (uid === forUid) wheel[uid] = w;
         else {
           const seg = w.seg != null ? WHEEL[w.seg] : null;
-          wheel[uid] = { spun: w.seg != null, done: w.done, kind: seg ? seg.kind : null, seg: seg && seg.kind !== 'sab' ? w.seg : null, spunAt: w.spunAt };
+          // التخريب والتبديل مفاجأة: الباقين يشوفون 😈 بس
+          wheel[uid] = { spun: w.seg != null, done: w.done, kind: seg ? (isTargeted(seg) ? 'sab' : seg.kind) : null, seg: seg && !isTargeted(seg) ? w.seg : null, spunAt: w.spunAt };
         }
       }
     }
@@ -858,7 +888,7 @@ export class Room extends DurableObject {
       gameNo: st.gameNo,
       players: st.order.map((u, seat) => {
         const p = st.players[u];
-        return { uid: u, seat, name: p.name, photo: p.photo, skin: p.skin, acc: p.acc || null, lvl: p.lvl || 0, score: p.score, mult: p.mult, on: p.on, mic: p.mic, guest: p.guest };
+        return { uid: u, seat, name: p.name, photo: p.photo, skin: p.skin, acc: p.acc || null, lvl: p.lvl || 0, score: p.score, mult: p.mult, bonus: p.bonus || 0, on: p.on, mic: p.mic, guest: p.guest };
       }),
       stage: (st.host && st.players[st.host] && st.players[st.host].stage) || 'stage:classic',
       sound: inGame && st.cur ? st.cur : null,
@@ -868,6 +898,7 @@ export class Room extends DurableObject {
       takes: Object.keys(st.takes),
       reports: Object.keys(st.reports),
       sab: showSab ? st.sabNow : null,
+      swap: showSab ? st.swapNow || [] : null,
       results: st.phase === 'playback' || st.phase === 'wheel' ? st.results : null,
       play: st.phase === 'playback' ? st.play : null,
       wheel,

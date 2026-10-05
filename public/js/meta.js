@@ -1,17 +1,18 @@
-// الحساب داخل اللعبة: اللفل والمايكات، المتجر واللبس، الرويال باس، الصندوق اليومي، ومكافآت نهاية اللعبة.
+// الحساب داخل اللعبة: اللفل والمايكات، المتجر واللبس، الرويال باس، الصندوق اليومي، الشراء بالنجوم، ومكافآت نهاية اللعبة.
 // كل شي هنا للاعبين تيليجرام (الضيف يلعب عادي بس ما يجمع).
 
-import { ITEMS, ITEM, CUR, RARITY, PASS, passReward, levelProgress, isFree, ADS } from './catalog.js';
+import { ITEMS, ITEM, CUR, RARITY, PASS, passReward, levelProgress, isFree, ADS, STAR_PACKS, packPrice, packBonus } from './catalog.js';
 import { THEMES, portrait } from './stage.js';
 import { $, el, toast, overlay } from './ui.js';
 import { authBody } from './net.js';
 import { haptic, tg as webApp } from './tg.js';
 import { Ads } from './ads.js';
+import { t, LANG, plusNum as plus } from './i18n.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmt = (n) => Number(n || 0).toLocaleString('en-US');
-// «+20» يبقى +20 حتى وسط جملة عربية (بدون عزل يطلع 20+)
-const plus = (n) => `\u2066+${fmt(n)}\u2069`;
+/** «300 مايك» — بالروسي «300 🎤» */
+const mics = (n, signed = false) => t('{s} مايك', { s: signed ? plus(n) : fmt(n), n });
 
 async function post(path, body = {}) {
   try {
@@ -28,7 +29,7 @@ const TABS = [
   ['head', '🎩 قبعات'],
   ['face', '🕶️ وجه'],
   ['stage', '🏟️ مسارح'],
-  ['mics', `${CUR.icon} ${CUR.name}`],
+  ['mics', '🎤 مايكات'],
 ];
 
 /** وين ينطي الباس هذا الغرض (للعرض) */
@@ -58,6 +59,12 @@ export class Meta {
 
   get tg() {
     return !!this.profile;
+  }
+
+  /** باقات النجوم (من السيرفر، وإلا من الكتالوج) */
+  packs(kind) {
+    const list = this.config.packs || STAR_PACKS.map((p) => ({ ...p, stars: packPrice(p, this.config.passPrice || 99) }));
+    return list.filter((p) => !kind || p.kind === kind);
   }
 
   onChange(fn) {
@@ -90,7 +97,7 @@ export class Meta {
   }
 
   tgOnly() {
-    toast('افتح اللعبة من تيليجرام حتى تجمع مايكات وتلعب الباس', 3500);
+    toast(t('افتح اللعبة من تيليجرام حتى تجمع مايكات وتلعب الباس'), 3500);
     return null;
   }
 
@@ -99,17 +106,17 @@ export class Meta {
   async watchAd(kind, item = null) {
     if (!this.tg) return this.tgOnly();
     if (!this.ads.rewarded) {
-      toast('الإعلانات بعدها ما مفعّلة');
+      toast(t('الإعلانات بعدها ما مفعّلة'));
       return null;
     }
     const intent = await post('/api/ads/intent', { kind, item });
     if (!intent.ok) {
-      toast(intent.error || intent.message || 'ما ينفع هسه', 3000);
+      toast(t(intent.error || intent.message || 'ما ينفع هسه'), 3000);
       return null;
     }
     const shown = await this.ads.showRewarded();
     if (!shown.done) {
-      if (shown.error && shown.error !== 'busy') toast(shown.error, 3000);
+      if (shown.error && shown.error !== 'busy') toast(t(shown.error), 3000);
       return null;
     }
     // إذا رابط المكافأة مضبوط بـAdsGram، المكافأة تجي من سيرفرهم: ننتظرها شوية
@@ -121,38 +128,94 @@ export class Meta {
         return r.result;
       }
       if (r.error && !r.pending) {
-        toast(r.error, 3000);
+        toast(t(r.error), 3000);
         return null;
       }
       await sleep(900);
     }
-    toast('المكافأة بالطريق — تنضاف لحسابك من توصل', 3500);
+    toast(t('المكافأة بالطريق — تنضاف لحسابك من توصل'), 3500);
     return null;
   }
 
   announce(res) {
     if (!res) return;
-    if (res.error) return toast(res.error, 3000);
+    if (res.error) return toast(t(res.error), 3000);
     haptic('success');
     const it = res.item && ITEM.get(res.item);
-    const passMsg = (p) => (p ? `🎖️ ${plus(p.xp)} خبرة باس${p.to > p.from ? ` — لفل ${p.to}!` : ''}` : '');
+    const passMsg = (p) => (p ? t('🎖️ {xp} خبرة باس', { xp: plus(p.xp) }) + (p.to > p.from ? t(' — لفل {n}!', { n: p.to }) : '') : '');
     switch (res.kind) {
       case 'coins':
       case 'double':
-        return toast(`${CUR.icon} ${plus(res.mics)} ${CUR.one}`);
+        return toast(`${CUR.icon} ${mics(res.mics, true)}`);
       case 'pass':
         return toast(passMsg(res.pass));
       case 'box':
-        if (it) return toast(`🎁 طلعلك: ${it.icon} ${it.name}!`, 3500);
+        if (it) return toast(t('🎁 طلعلك: {item}!', { item: `${it.icon} ${t(it.name)}` }), 3500);
         if (res.pass) return toast('🎁 ' + passMsg(res.pass), 3500);
-        return toast(`🎁 ${plus(res.mics)} ${CUR.one}`, 3000);
+        return toast(`🎁 ${mics(res.mics, true)}`, 3000);
       case 'unlock':
-        if (res.unlocked) return toast(`🔓 انفتح: ${it ? it.icon + ' ' + it.name : ''}!`, 3500);
-        return toast(`🎬 ${res.n}/${res.need} — باقي ${res.need - res.n} ${res.need - res.n === 1 ? 'إعلان' : 'إعلانات'}`, 3000);
+        if (res.unlocked) return toast(t('🔓 انفتح: {item}!', { item: it ? `${it.icon} ${t(it.name)}` : '' }), 3500);
+        return toast(t('🎬 {n}/{need} — باقي {left} إعلانات', { n: res.n, need: res.need, left: res.need - res.n }), 3000);
       case 'trial':
-        return toast(`⏳ تكدر تلبس ${it ? it.name : 'الغرض'} 24 ساعة`, 3000);
+        return toast(t('⏳ تكدر تلبس {item} 24 ساعة', { item: it ? t(it.name) : t('الغرض') }), 3000);
       default:
     }
+  }
+
+  /* ============================================================ الشراء بالنجوم ⭐ */
+
+  /** يطلب فاتورة نجوم ويفتحها داخل تيليجرام، وبعد الدفع ينتظر لحد ما توصل المشتريات */
+  async payStars(path, body, waitFor, done) {
+    if (!this.tg) return this.tgOnly();
+    if (!webApp || !webApp.openInvoice) return toast(t('الدفع بالنجوم يشتغل داخل تيليجرام بس'), 3000);
+    const r = await post(path, { ...body, lang: LANG });
+    if (!r.ok) {
+      haptic('error');
+      return toast(t(r.error || 'ما زبطت الفاتورة'), 3000);
+    }
+    const before = this.profile ? { mics: this.profile.mics, xp: this.profile.pass.xp, premium: this.profile.pass.premium } : null;
+    webApp.openInvoice(r.link, async (status) => {
+      if (status === 'paid') {
+        toast(t('🎉 تم الدفع! جاري التسليم…'), 2500);
+        for (let i = 0; i < 12; i++) {
+          await sleep(1100);
+          const me = await this.refresh();
+          if (me.profile && waitFor(me.profile, before)) {
+            haptic('success');
+            toast(done(me.profile), 3500);
+            return;
+          }
+        }
+        toast(t('الدفع وصل — إذا ما بان، سكّر اللعبة وافتحها'), 4000);
+      } else if (status === 'failed') toast(t('ما تم الدفع'), 2500);
+    });
+    return null;
+  }
+
+  buyPass() {
+    return this.payStars(
+      '/api/pass/invoice',
+      {},
+      (p) => p.pass.premium,
+      () => t('🎖️ تفعّل الرويال باس المميز!'),
+    );
+  }
+
+  buyPack(sku) {
+    const pack = this.packs().find((p) => p.sku === sku);
+    if (!pack) return null;
+    const changed = (p, b) => !b || p.mics !== b.mics || p.pass.xp !== b.xp || p.pass.premium !== b.premium;
+    return this.payStars('/api/stars/invoice', { sku }, changed, (p) => {
+      if (pack.kind === 'mics') return t('🎤 انضاف {s} لرصيدك!', { s: mics(pack.mics) });
+      if (pack.kind === 'passplus') return t('🎖️ تفعّل المميز وصرت لفل {n}!', { n: p.pass.level });
+      return t('🎖️ الباس صار لفل {n}!', { n: p.pass.level });
+    });
+  }
+
+  /** يكدر يشتري باقة لفلات هسه؟ */
+  canLevels(pack) {
+    const ps = this.profile && this.profile.pass;
+    return !!ps && ps.level + pack.levels <= ps.cap;
   }
 
   /* ============================================================ المتجر */
@@ -162,22 +225,22 @@ export class Meta {
     if (!this.tg) return this.tgOnly();
     if (this.profile.mics < it.price) {
       haptic('error');
-      return toast(`ناقصك ${fmt(it.price - this.profile.mics)} ${CUR.one}`, 2500);
+      return toast(t('ناقصك {s}', { s: mics(it.price - this.profile.mics) }), 2500);
     }
     const r = await post('/api/shop/buy', { item: id });
     if (r.profile) this.set(r.profile);
     if (r.ok) {
       haptic('success');
-      toast(`✅ صار عندك ${it.icon} ${it.name}`);
+      toast(t('✅ صار عندك {item}', { item: `${it.icon} ${t(it.name)}` }));
       await this.equip(it.type, id, true);
-    } else toast(r.error || 'ما زبط', 2500);
+    } else toast(t(r.error || 'ما زبط'), 2500);
   }
 
   async equip(slot, id, quiet = false) {
     if (!this.tg) return this.tgOnly();
     const r = await post('/api/shop/equip', { slot, item: id });
     if (r.profile) this.set(r.profile);
-    if (!r.ok) toast(r.error || 'ما زبط', 2500);
+    if (!r.ok) toast(t(r.error || 'ما زبط'), 2500);
     else if (!quiet) haptic('select');
     if (this.onLook) this.onLook();
   }
@@ -222,10 +285,10 @@ export class Meta {
     const btn = (label, cls, fn) => el('button', { class: 'it-btn ' + cls, onclick: (e) => (e.stopPropagation(), fn()) }, label);
     if (st.has) {
       if (st.equipped) {
-        actions.push(el('div', { class: 'it-on' }, it.type === 'stage' ? '✓ مختار' : '✓ لابسه'));
-        if (it.type === 'head' || it.type === 'face') actions.push(btn('شيل', 'ghost', () => this.equip(it.type, null)));
-      } else actions.push(btn(it.type === 'stage' ? 'اختاره' : 'البسه', 'green', () => this.equip(it.type, it.id)));
-      if (st.trial) actions.push(el('div', { class: 'it-note' }, `⏳ تجربة: باقي ${Math.max(1, Math.ceil((st.trial - Date.now()) / 3600000))} ساعة`));
+        actions.push(el('div', { class: 'it-on' }, it.type === 'stage' ? t('✓ مختار') : t('✓ لابسه')));
+        if (it.type === 'head' || it.type === 'face') actions.push(btn(t('شيل'), 'ghost', () => this.equip(it.type, null)));
+      } else actions.push(btn(it.type === 'stage' ? t('اختاره') : t('البسه'), 'green', () => this.equip(it.type, it.id)));
+      if (st.trial) actions.push(el('div', { class: 'it-note' }, t('⏳ تجربة: باقي {h} ساعة', { h: Math.max(1, Math.ceil((st.trial - Date.now()) / 3600000)) })));
     }
     if (!st.forever) {
       if (it.price != null) {
@@ -233,17 +296,18 @@ export class Meta {
         actions.push(btn(`${CUR.icon} ${fmt(it.price)}`, 'buy' + (poor ? ' poor' : ''), () => this.buy(it.id)));
       }
       if (it.ads && this.ads.rewarded) actions.push(btn(`🎬 ${st.adN}/${it.ads}`, 'ad', () => this.watchAd('unlock', it.id)));
-      if (it.price != null && !st.trial && this.ads.rewarded) actions.push(btn('جرّب 24س 🎬', 'try', () => this.watchAd('trial', it.id)));
+      if (it.price != null && !st.trial && this.ads.rewarded) actions.push(btn(t('جرّب 24س 🎬'), 'try', () => this.watchAd('trial', it.id)));
       if (it.pass) {
         const src = PASS_SOURCE.get(it.id);
-        actions.push(el('div', { class: 'it-note pass ' + it.pass }, `🎖️ الباس ${it.pass === 'premium' ? 'المميز' : 'المجاني'}${src ? ' — لفل ' + src.level : ''}`));
+        const where = it.pass === 'premium' ? t('🎖️ الباس المميز') : t('🎖️ الباس المجاني');
+        actions.push(el('div', { class: 'it-note pass ' + it.pass }, src ? t('{where} — لفل {n}', { where, n: src.level }) : where));
       }
     }
     return el(
       'div',
       { class: 'it-card' + (st.equipped ? ' equipped' : '') + (st.has ? ' has' : ''), style: { '--rar': rar.color } },
-      el('div', { class: 'it-prev' }, this.preview(it), el('span', { class: 'it-rar' }, rar.name)),
-      el('div', { class: 'it-name' }, it.name),
+      el('div', { class: 'it-prev' }, this.preview(it), el('span', { class: 'it-rar' }, t(rar.name))),
+      el('div', { class: 'it-name' }, t(it.name)),
       el('div', { class: 'it-acts' }, actions),
     );
   }
@@ -251,17 +315,34 @@ export class Meta {
   micsTab() {
     const p = this.profile;
     const cards = [];
-    const card = (icon, title, sub, button) => el('div', { class: 'earn-card' }, el('div', { class: 'earn-ic' }, icon), el('div', { class: 'earn-t' }, title), el('div', { class: 'earn-s' }, sub), button);
+    const card = (icon, title, sub, button, cls = '') =>
+      el('div', { class: 'earn-card' + cls }, el('div', { class: 'earn-ic' }, icon), el('div', { class: 'earn-t' }, title), el('div', { class: 'earn-s' }, sub), button);
     const adBtn = (label, ok, fn) => el('button', { class: 'it-btn ad' + (ok ? '' : ' poor'), onclick: fn }, label);
-    if (!this.ads.rewarded) cards.push(card('🎬', 'الإعلانات بعدها ما مفعّلة', 'العب وجمّع مايكات من كل لعبة', null));
+    if (!this.ads.rewarded) cards.push(card('🎬', t('الإعلانات بعدها ما مفعّلة'), t('العب وجمّع مايكات من كل لعبة'), null));
     else {
-      cards.push(card(CUR.icon, `${plus(ADS.coins.mics)} ${CUR.one}`, `باقي ${p.daily.coins} من ${ADS.coins.perDay} اليوم`, adBtn('🎬 شاهد', p.daily.coins > 0, () => this.watchAd('coins'))));
-      cards.push(card('🎁', 'صندوق اليوم', p.daily.box > 0 ? 'مايكات أو إكسسوار أو خبرة باس' : 'فتحته اليوم — ارجع باچر', adBtn('🎬 افتح', p.daily.box > 0, () => this.watchAd('box'))));
-      if (p.lastGame && p.lastGame.canDouble)
-        cards.push(card('✖️2', 'ضاعف آخر لعبة', `${plus(p.lastGame.mics)} ${CUR.one}`, adBtn('🎬 ضاعف', true, () => this.watchAd('double'))));
+      cards.push(card(CUR.icon, mics(ADS.coins.mics, true), t('باقي {n} من {m} اليوم', { n: p.daily.coins, m: ADS.coins.perDay }), adBtn(t('🎬 شاهد'), p.daily.coins > 0, () => this.watchAd('coins'))));
+      cards.push(card('🎁', t('صندوق اليوم'), p.daily.box > 0 ? t('مايكات أو إكسسوار أو خبرة باس') : t('فتحته اليوم — ارجع باچر'), adBtn(t('🎬 افتح'), p.daily.box > 0, () => this.watchAd('box'))));
+      if (p.lastGame && p.lastGame.canDouble) cards.push(card('✖️2', t('ضاعف آخر لعبة'), mics(p.lastGame.mics, true), adBtn(t('🎬 ضاعف'), true, () => this.watchAd('double'))));
     }
-    cards.push(card('🎮', 'العب', `كل لعبة تنطيك ${CUR.name} حسب نقاطك، والفائز ويا ربعه +15، وكل لفل جديد مكافأة`, null));
-    return el('div', { class: 'earn-grid' }, cards);
+    cards.push(card('🎮', t('العب'), t('كل لعبة تنطيك مايكات حسب نقاطك، والفائز ويا ربعه +15، وكل لفل جديد مكافأة'), null));
+    // باقات النجوم
+    const starCards = this.packs('mics').map((pk) => {
+      const bonus = packBonus(pk);
+      return card(
+        pk.icon || CUR.icon,
+        mics(pk.mics),
+        bonus > 0 ? t('{b}% زيادة 🔥', { b: plus(bonus) }) : t('الباقة الأساسية'),
+        el('button', { class: 'it-btn star', onclick: () => this.buyPack(pk.sku) }, `⭐ ${pk.stars}`),
+        ' star' + (bonus >= 50 ? ' best' : ''),
+      );
+    });
+    return el(
+      'div',
+      { class: 'mics-tab' },
+      el('div', { class: 'earn-grid' }, cards),
+      starCards.length ? el('div', { class: 'star-head' }, t('⭐ اشتري مايكات بنجوم تيليجرام')) : null,
+      starCards.length ? el('div', { class: 'earn-grid' }, starCards) : null,
+    );
   }
 
   openShop({ tab = 'skin', onClose = null } = {}) {
@@ -286,17 +367,17 @@ export class Meta {
       const panel = el(
         'div',
         { class: 'panel shop' },
-        el('button', { class: 'xbtn', onclick: close }, '✕'),
+        el('button', { class: 'xbtn', 'aria-label': t('سكّر'), onclick: close }, '✕'),
         el(
           'div',
           { class: 'shop-head' },
-          el('div', { class: 'panel-title' }, '🛒 المتجر'),
-          el('div', { class: 'mics-pill' }, `${CUR.icon} ${fmt(p.mics)}`),
+          el('div', { class: 'panel-title' }, t('🛒 المتجر')),
+          el('button', { class: 'mics-pill', onclick: () => ((cur = 'mics'), (scroller = null), render()) }, `${CUR.icon} ${fmt(p.mics)}`, el('span', { class: 'pill-plus' }, '+')),
         ),
         el(
           'div',
           { class: 'tabs' },
-          TABS.map(([k, label]) => el('button', { class: 'tab' + (k === cur ? ' on' : ''), onclick: () => ((cur = k), (scroller = null), render()) }, label)),
+          TABS.map(([k, label]) => el('button', { class: 'tab' + (k === cur ? ' on' : ''), onclick: () => ((cur = k), (scroller = null), render()) }, t(label))),
         ),
         scroller,
       );
@@ -330,30 +411,9 @@ export class Meta {
       'div',
       { class: 'rp-cell' + (reached ? ' got' : '') + (locked ? ' locked' : '') + (it ? ' item' : ''), style: it ? { '--rar': (RARITY[it.rarity] || RARITY.common).color } : null },
       el('div', { class: 'rp-ic' }, it ? it.icon : CUR.icon),
-      el('div', { class: 'rp-lb' }, it ? it.name : `${plus(r.mics)}`),
+      el('div', { class: 'rp-lb' }, it ? t(it.name) : plus(r.mics)),
       locked ? el('div', { class: 'rp-lock' }, '🔒') : reached ? el('div', { class: 'rp-ok' }, '✓') : null,
     );
-  }
-
-  async buyPass() {
-    if (!this.tg) return this.tgOnly();
-    const r = await post('/api/pass/invoice');
-    if (!r.ok) return toast(r.error || 'ما زبطت الفاتورة', 3000);
-    if (!webApp || !webApp.openInvoice) return toast('افتح البوت واكتب /pass حتى تدفع', 3500);
-    webApp.openInvoice(r.link, async (status) => {
-      if (status === 'paid') {
-        toast('🎉 تم الدفع! جاري التفعيل…', 2500);
-        for (let i = 0; i < 10; i++) {
-          await sleep(1200);
-          const me = await this.refresh();
-          if (me.profile && me.profile.pass.premium) {
-            haptic('success');
-            toast('🎖️ تفعّل الرويال باس المميز!', 3500);
-            return;
-          }
-        }
-      } else if (status === 'failed') toast('ما تم الدفع', 2500);
-    });
   }
 
   openPass({ onClose = null } = {}) {
@@ -378,34 +438,61 @@ export class Meta {
           ),
         );
       }
-      track = el('div', { class: 'rp-track' }, el('div', { class: 'rp-rows' }, el('div', { class: 'rp-tag free' }, 'مجاني'), el('div', { class: 'rp-tag prem' }, '⭐ مميز')), cols);
+      track = el('div', { class: 'rp-track' }, el('div', { class: 'rp-rows' }, el('div', { class: 'rp-tag free' }, t('مجاني')), el('div', { class: 'rp-tag prem' }, t('⭐ مميز'))), cols);
       const adLeft = p.daily.pass;
+      const plusPack = this.packs('passplus')[0];
+      const lvPacks = this.packs('levels');
       const panel = el(
         'div',
         { class: 'panel pass' },
-        el('button', { class: 'xbtn', onclick: close }, '✕'),
+        el('button', { class: 'xbtn', 'aria-label': t('سكّر'), onclick: close }, '✕'),
         el(
           'div',
           { class: 'pass-head' },
-          el('div', {}, el('div', { class: 'panel-title' }, `🎖️ الرويال باس — الموسم ${ps.season}`), el('div', { class: 'hint' }, `باقي ${days} يوم · كل ${PASS.xpPerLevel} خبرة = لفل · نقاطك باللعب = خبرة`)),
+          el(
+            'div',
+            {},
+            el('div', { class: 'panel-title' }, t('🎖️ الرويال باس — الموسم {s}', { s: ps.season })),
+            el('div', { class: 'hint' }, t('باقي {d} يوم · كل {xp} خبرة = لفل · نقاطك باللعب = خبرة', { d: days, xp: PASS.xpPerLevel })),
+          ),
           ps.premium
-            ? el('div', { class: 'prem-badge' }, '⭐ مميز — 100 لفل')
-            : el('button', { class: 'btn gold', onclick: () => this.buyPass() }, `⭐ ${this.config.passPrice || 99} — افتح 100 لفل`),
+            ? el('div', { class: 'prem-badge' }, t('⭐ مميز — 100 لفل'))
+            : el(
+                'div',
+                { class: 'prem-btns' },
+                el('button', { class: 'btn gold', onclick: () => this.buyPass() }, t('⭐ {p} — افتح 100 لفل', { p: this.config.passPrice || 99 })),
+                plusPack ? el('button', { class: 'btn gold plus', onclick: () => this.buyPack(plusPack.sku) }, t('⭐ {p} — مميز + 10 لفلات', { p: plusPack.stars })) : null,
+              ),
         ),
         el(
           'div',
           { class: 'pass-prog' },
-          el('div', { class: 'pass-lv' }, el('small', {}, 'لفل'), el('b', {}, String(ps.level)), el('small', {}, `من ${ps.cap}`)),
+          el('div', { class: 'pass-lv' }, el('small', {}, t('لفل')), el('b', {}, String(ps.level)), el('small', {}, t('من {n}', { n: ps.cap }))),
           el(
             'div',
             { class: 'pass-bar' },
             el('i', { style: { width: `${Math.round((inLevel / PASS.xpPerLevel) * 100)}%` } }),
-            el('span', {}, ps.level >= ps.cap ? (ps.premium ? 'خلصت الباس 🎉' : 'وصلت 50 — المميز يفتح لحد 100') : `${inLevel} / ${PASS.xpPerLevel} خبرة`),
+            el('span', {}, ps.level >= ps.cap ? (ps.premium ? t('خلصت الباس 🎉') : t('وصلت 50 — المميز يفتح لحد 100')) : t('{a} / {b} خبرة', { a: inLevel, b: PASS.xpPerLevel })),
           ),
           this.ads.rewarded
-            ? el('button', { class: 'it-btn ad' + (adLeft > 0 ? '' : ' poor'), onclick: () => this.watchAd('pass') }, `🎬 ${plus(PASS.adXp)} خبرة (${adLeft})`)
+            ? el('button', { class: 'it-btn ad' + (adLeft > 0 ? '' : ' poor'), onclick: () => this.watchAd('pass') }, t('🎬 {xp} خبرة ({n})', { xp: plus(PASS.adXp), n: adLeft }))
             : null,
         ),
+        lvPacks.length
+          ? el(
+              'div',
+              { class: 'lv-buy' },
+              el('span', { class: 'lv-buy-t' }, t('⭐ اشتري لفلات:')),
+              lvPacks.map((pk) =>
+                el(
+                  'button',
+                  { class: 'it-btn star' + (this.canLevels(pk) ? '' : ' poor'), onclick: () => this.buyPack(pk.sku) },
+                  el('b', {}, plus(pk.levels)),
+                  ` · ⭐${pk.stars}`,
+                ),
+              ),
+            )
+          : null,
         track,
       );
       this.mount(panel);
@@ -445,7 +532,7 @@ export class Meta {
               el('span', { class: 'lv-bar' }, el('i', { style: { width: `${Math.round(lp.frac * 100)}%` } })),
               el('span', { class: 'pc-mics' }, `${CUR.icon} ${fmt(p.mics)}`),
             )
-          : el('small', {}, 'ضيف — افتح من تيليجرام حتى تجمع'),
+          : el('small', {}, t('ضيف — افتح من تيليجرام حتى تجمع')),
       ),
     );
   }
@@ -454,18 +541,19 @@ export class Meta {
   rewardsStrip(reward) {
     if (!reward) return null;
     const micsB = el('b', {}, plus(reward.mics));
-    const items = [el('div', { class: 'rw' }, micsB, el('span', {}, `${CUR.icon} ${CUR.name}`))];
-    if (reward.lvTo > reward.lvFrom) items.push(el('div', { class: 'rw up' }, el('b', {}, `⭐ ${reward.lvFrom} ← ${reward.lvTo}`), el('span', {}, `لفل جديد ${plus(reward.levelMics)} ${CUR.icon}`)));
+    const items = [el('div', { class: 'rw' }, micsB, el('span', {}, `${CUR.icon} ${t('مايكات')}`))];
+    if (reward.lvTo > reward.lvFrom)
+      items.push(el('div', { class: 'rw up' }, el('b', {}, `⭐ ${reward.lvFrom} ← ${reward.lvTo}`), el('span', {}, t('لفل جديد {s}', { s: `${plus(reward.levelMics)} ${CUR.icon}` }))));
     if (reward.pass) {
       const p = reward.pass;
-      items.push(el('div', { class: 'rw' }, el('b', {}, `${plus(p.xp)}`), el('span', {}, p.to > p.from ? `🎖️ باس لفل ${p.to}!` : '🎖️ خبرة باس')));
+      items.push(el('div', { class: 'rw' }, el('b', {}, plus(p.xp)), el('span', {}, p.to > p.from ? t('🎖️ باس لفل {n}!', { n: p.to }) : t('🎖️ خبرة باس'))));
       for (const r of (p.rewards || []).filter((x) => x.item)) {
         const it = ITEM.get(r.item);
-        if (it) items.push(el('div', { class: 'rw up' }, el('b', {}, it.icon), el('span', {}, r.dup ? `${it.name} (${plus(r.dup)} ${CUR.icon})` : it.name)));
+        if (it) items.push(el('div', { class: 'rw up' }, el('b', {}, it.icon), el('span', {}, r.dup ? `${t(it.name)} (${plus(r.dup)} ${CUR.icon})` : t(it.name))));
       }
     }
     const can = this.ads.rewarded && this.profile && this.profile.lastGame && this.profile.lastGame.canDouble && this.profile.lastGame.gkey === reward.gkey;
-    const strip = el('div', { class: 'rewards' }, el('div', { class: 'rw-title' }, '🎁 مكافآتك'), el('div', { class: 'rw-items' }, items));
+    const strip = el('div', { class: 'rewards' }, el('div', { class: 'rw-title' }, t('🎁 مكافآتك')), el('div', { class: 'rw-items' }, items));
     if (can) {
       const b = el(
         'button',
@@ -476,12 +564,12 @@ export class Meta {
             const r = await this.watchAd('double');
             if (r && !r.error) {
               b.remove();
-              micsB.textContent = `\u2066+${fmt(reward.mics + (r.mics || reward.mics))} ×2\u2069`;
+              micsB.textContent = `⁦+${fmt(reward.mics + (r.mics || reward.mics))} ×2⁩`;
               micsB.parentElement.classList.add('up');
             } else b.disabled = false;
           },
         },
-        `🎬 ضاعف ${CUR.name}ك (${plus(reward.mics)})`,
+        t('🎬 ضاعف مايكاتك ({s})', { s: plus(reward.mics) }),
       );
       strip.appendChild(b);
     }

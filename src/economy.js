@@ -19,6 +19,7 @@ import {
   ADS,
   dayKey,
   RARITY,
+  STAR_PACK,
 } from '../public/js/catalog.js';
 
 const DUP_MICS = { common: 80, rare: 150, epic: 300, legendary: 500 };
@@ -53,6 +54,13 @@ export class Economy {
     sql.exec('CREATE TABLE IF NOT EXISTS intents (uid TEXT PRIMARY KEY, nonce TEXT, kind TEXT, item TEXT, at INTEGER, status TEXT, result TEXT)');
     sql.exec('CREATE TABLE IF NOT EXISTS lastgame (uid TEXT PRIMARY KEY, gkey TEXT, mics INTEGER, doubled INTEGER DEFAULT 0, at INTEGER)');
     sql.exec('CREATE TABLE IF NOT EXISTS payments (charge TEXT PRIMARY KEY, uid TEXT, season INTEGER, stars INTEGER, at INTEGER, refunded INTEGER DEFAULT 0)');
+    for (const c of ["sku TEXT DEFAULT 'pass'", 'qty INTEGER DEFAULT 0']) {
+      try {
+        sql.exec('ALTER TABLE payments ADD COLUMN ' + c);
+      } catch {
+        /* موجود */
+      }
+    }
   }
 
   /* ============================================================ أساسيات */
@@ -225,15 +233,61 @@ export class Economy {
     return { ok: true, season, rewards, pass: this.passOf(this.row(uid), now) };
   }
 
+  /* ============================================================ باقات النجوم ⭐ */
+
+  /** يكدر يشتري الباقة هسه؟ (نفس الفحص بالفاتورة وبموافقة الدفع) */
+  canBuyPack(uid, sku, season, now = Date.now()) {
+    const pack = STAR_PACK.get(sku);
+    if (!pack) return { ok: false, error: 'هاي الباقة مو موجودة' };
+    if (pack.kind === 'mics') return { ok: true };
+    if (season !== seasonOf(now)) return { ok: false, error: 'الموسم خلص، افتح الباس من جديد واطلب فاتورة جديدة' };
+    const row = this.row(uid);
+    const p = this.passOf(row, now);
+    if (pack.kind === 'passplus') {
+      if (p.premium) return { ok: false, error: 'عندك الباس المميز لهالموسم ✅' };
+      return { ok: true };
+    }
+    if (p.level >= p.cap) return { ok: false, error: p.premium ? 'خلصت الباس كله 🎉' : 'المجاني يوكف على 50 — افتح المميز حتى تكمل لحد 100' };
+    if (p.level + pack.levels > p.cap) return { ok: false, error: p.premium ? 'اللفلات الباقية أقل من الباقة — اختار باقة أصغر' : 'المجاني يوكف على 50 — اختار باقة أصغر أو افتح المميز' };
+    return { ok: true };
+  }
+
+  /** يسلّم الباقة بعد الدفع (مرة وحدة لكل دفعة) */
+  grantPack(uid, sku, payloadSeason, charge, stars, now = Date.now()) {
+    const pack = STAR_PACK.get(sku);
+    if (!pack) return { ok: false, error: 'باقة غلط' };
+    const dup = this.sql.exec('SELECT uid FROM payments WHERE charge = ?', charge).toArray()[0];
+    if (dup) return { ok: true, already: true, kind: pack.kind };
+    const season = Math.max(payloadSeason || 0, seasonOf(now));
+    this.ensureUser(uid);
+    const qty = pack.kind === 'mics' ? pack.mics : pack.levels;
+    this.sql.exec('INSERT INTO payments (charge, uid, season, stars, at, sku, qty) VALUES (?, ?, ?, ?, ?, ?, ?)', charge, uid, season, stars, now, sku, qty);
+    if (pack.kind === 'mics') {
+      this.addMics(uid, pack.mics);
+      return { ok: true, kind: 'mics', mics: pack.mics };
+    }
+    this.touchSeason(uid, now);
+    if (pack.kind === 'passplus') this.sql.exec('UPDATE users SET pass_prem = ? WHERE id = ?', season, uid);
+    const pass = this.addPassXp(uid, pack.levels * PASS.xpPerLevel, now);
+    return { ok: true, kind: pack.kind, season, premium: pack.kind === 'passplus', pass };
+  }
+
   paymentByCharge(charge) {
     return this.sql.exec('SELECT * FROM payments WHERE charge = ?', charge).toArray()[0] || null;
   }
 
-  markRefunded(charge) {
+  /** بعد استرجاع النجوم: نسحب اللي انطاه (الجوائز اللي استلمها تبقى) */
+  markRefunded(charge, now = Date.now()) {
     const p = this.paymentByCharge(charge);
     if (!p) return null;
+    if (p.refunded) return p;
     this.sql.exec('UPDATE payments SET refunded = 1 WHERE charge = ?', charge);
-    this.sql.exec('UPDATE users SET pass_prem = 0 WHERE id = ? AND pass_prem = ?', p.uid, p.season);
+    const sku = p.sku || 'pass';
+    const pack = STAR_PACK.get(sku);
+    if (sku === 'pass' || (pack && pack.kind === 'passplus')) this.sql.exec('UPDATE users SET pass_prem = 0 WHERE id = ? AND pass_prem = ?', p.uid, p.season);
+    if (pack && pack.kind === 'mics') this.addMics(p.uid, -(p.qty || pack.mics));
+    if (pack && (pack.kind === 'levels' || pack.kind === 'passplus'))
+      this.sql.exec('UPDATE users SET pass_xp = MAX(0, pass_xp - ?) WHERE id = ? AND pass_season = ?', (p.qty || pack.levels) * PASS.xpPerLevel, p.uid, p.season);
     return p;
   }
 

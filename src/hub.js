@@ -96,6 +96,12 @@ export class Hub extends DurableObject {
   grantPremium(uid, season, charge, stars) {
     return this.eco.grantPremium(uid, season, charge, stars);
   }
+  canBuyPack(uid, sku, season) {
+    return this.eco.canBuyPack(uid, sku, season);
+  }
+  grantPack(uid, sku, season, charge, stars) {
+    return this.eco.grantPack(uid, sku, season, charge, stars);
+  }
   paymentByCharge(charge) {
     return this.eco.paymentByCharge(charge);
   }

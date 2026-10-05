@@ -32,9 +32,15 @@ export function startParam() {
   return q.get('tgWebAppStartParam') || '';
 }
 
+let hapticsOn = true;
+/** الاهتزاز من الإعدادات */
+export function setHaptics(on) {
+  hapticsOn = !!on;
+}
+
 export function haptic(kind) {
   const h = webApp && webApp.HapticFeedback;
-  if (!h) return;
+  if (!h || !hapticsOn) return;
   safely('haptic', () => {
     if (kind === 'success' || kind === 'error' || kind === 'warning') h.notificationOccurred(kind);
     else if (kind === 'select') h.selectionChanged();

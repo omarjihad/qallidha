@@ -1,6 +1,7 @@
 // الاتصال بالسيرفر: طلبات API + اتصال الغرفة (WebSocket) مع مزامنة الساعة وإعادة الاتصال.
 
 import { initData, insideTelegram, unsafeUser } from './tg.js';
+import { t } from './i18n.js';
 
 const store = {
   get(k) {
@@ -29,7 +30,7 @@ export function guestIdentity() {
   }
   let name = store.get('qd_gname');
   if (!name) {
-    name = 'ضيف ' + id.slice(0, 3).toUpperCase();
+    name = t('ضيف') + ' ' + id.slice(0, 3).toUpperCase();
     store.set('qd_gname', name);
   }
   guest = { id, name };
@@ -52,7 +53,7 @@ export async function api(path, body) {
 export function localName() {
   if (insideTelegram) {
     const u = unsafeUser();
-    return (u && u.first_name) || 'لاعب';
+    return (u && u.first_name) || t('لاعب');
   }
   return guestIdentity().name;
 }

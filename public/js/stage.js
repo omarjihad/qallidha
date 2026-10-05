@@ -801,6 +801,14 @@ const SHOTS = {
 export class Stage {
   constructor(canvas) {
     this.canvas = canvas;
+    this.aa = true;
+    this.aniso = 8;
+    this.minFrameMs = 0;
+    this.acc = 0;
+    this.prevNow = 0;
+    this.fpsEl = null;
+    this.fpsN = 0;
+    this.fpsT0 = 0;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -892,7 +900,7 @@ export class Stage {
     const old = [this.floorMat.map, this.wallMat.map];
     const tex = floorTexture(T.floor);
     tex.repeat.set(T.floor.kind === 'checker' ? 16 : 8, T.floor.kind === 'checker' ? 8 : 4);
-    tex.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    tex.anisotropy = Math.min(this.aniso || 8, this.renderer.capabilities.getMaxAnisotropy());
     this.floorMat.map = tex;
     this.floorMat.needsUpdate = true;
     this.wallMat.map = wallTexture(T);
@@ -911,6 +919,72 @@ export class Stage {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+  }
+
+  /* ------------------------------------------------------------ الإعدادات: الجودة والفريمات */
+
+  /** low | medium | high | max | auto — دقة الرسم ونعومة الحواف */
+  setQuality(q) {
+    let mode = q;
+    if (!['low', 'medium', 'high', 'max'].includes(mode)) {
+      const mem = navigator.deviceMemory || 4;
+      const cores = navigator.hardwareConcurrency || 4;
+      mode = mem <= 2 || cores <= 4 ? 'medium' : 'high';
+    }
+    const dpr = window.devicePixelRatio || 1;
+    const conf = {
+      low: { pr: Math.min(dpr, 0.75), aa: false, aniso: 1 },
+      medium: { pr: Math.min(dpr, 1), aa: false, aniso: 2 },
+      high: { pr: Math.min(dpr, 1.75), aa: true, aniso: 8 },
+      max: { pr: Math.min(dpr, 3), aa: true, aniso: 16 },
+    }[mode];
+    this.qualityMode = mode;
+    this.aniso = conf.aniso;
+    if (conf.aa !== this.aa) this.rebuildRenderer(conf.aa);
+    this.renderer.setPixelRatio(conf.pr);
+    this.renderer.setSize(this.w, this.h, false);
+    const map = this.floorMat && this.floorMat.map;
+    if (map) {
+      map.anisotropy = Math.min(conf.aniso, this.renderer.capabilities.getMaxAnisotropy());
+      map.needsUpdate = true;
+    }
+  }
+
+  /** نعومة الحواف تحتاج سياق WebGL جديد: نبدّل الكانفس بواحد جديد */
+  rebuildRenderer(aa) {
+    const old = this.renderer;
+    const canvas = document.createElement('canvas');
+    canvas.id = old.domElement.id;
+    canvas.className = old.domElement.className;
+    old.domElement.replaceWith(canvas);
+    try {
+      old.dispose();
+      old.forceContextLoss();
+    } catch {
+      /* */
+    }
+    this.canvas = canvas;
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: aa, alpha: false, powerPreference: 'high-performance' });
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.aa = aa;
+  }
+
+  /** حد الفريمات بالثانية (0 = حسب الشاشة) */
+  setFps(fps) {
+    this.minFrameMs = fps > 0 ? 1000 / fps : 0;
+    this.acc = 0;
+  }
+
+  /** عدّاد الفريمات بالزاوية */
+  showFps(on) {
+    this.fpsEl = on ? document.getElementById('fps') : null;
+    const e = document.getElementById('fps');
+    if (e) {
+      e.classList.toggle('show', !!on);
+      if (!on) e.textContent = '';
+    }
+    this.fpsN = 0;
+    this.fpsT0 = performance.now();
   }
 
   /** wide | menu | medium | closeup(uid) */
@@ -1022,10 +1096,26 @@ export class Stage {
     }
   }
 
-  loop() {
+  loop(now = performance.now()) {
     if (!this.running) return;
     requestAnimationFrame(this.loop);
     if (document.hidden) return;
+    // حد الفريمات: نجمع الوقت ونرسم بس إذا وصل فاصل الفريم
+    const gap = this.prevNow ? Math.min(250, now - this.prevNow) : 16;
+    this.prevNow = now;
+    if (this.minFrameMs) {
+      this.acc += gap;
+      if (this.acc + 1 < this.minFrameMs) return;
+      this.acc = Math.min(this.acc - this.minFrameMs, this.minFrameMs);
+    }
+    if (this.fpsEl) {
+      this.fpsN++;
+      if (now - this.fpsT0 >= 500) {
+        this.fpsEl.textContent = `${Math.round((this.fpsN * 1000) / (now - this.fpsT0))} FPS`;
+        this.fpsN = 0;
+        this.fpsT0 = now;
+      }
+    }
     const dt = Math.min(0.05, this.clock.getDelta());
     const t = this.clock.elapsedTime;
     for (const c of this.chars.values()) c.update(dt, t);

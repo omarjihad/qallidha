@@ -2,6 +2,7 @@
 
 import { SR, resample, toMono, peaks, peakOf } from './dsp.js';
 import { MAX_REC } from './shared.js';
+import { settings, onSetting, releaseMicAfterRecord } from './settings.js';
 
 const WORKLET_SRC = `
 class QdRec extends AudioWorkletProcessor {
@@ -57,6 +58,26 @@ export class AudioEngine {
     this.cache = new Map();
     this.sfxBufs = null;
     this.muted = false;
+    onSetting((k) => {
+      if (k === 'volume') this.applyVolume();
+    });
+    // المايك المفتوح يتسكّر إذا التطبيق بقى بالخلفية دقيقة ونص
+    document.addEventListener('visibilitychange', () => {
+      clearTimeout(this.hiddenTimer);
+      if (document.hidden) this.hiddenTimer = setTimeout(() => document.hidden && !this.armed && this.closeMic(), 90000);
+    });
+  }
+
+  applyVolume() {
+    if (!this.master) return;
+    const v = Math.max(0, Math.min(1, settings.volume));
+    // منحنى أُسّي حتى يكون السلايدر طبيعي للأذن
+    const g = v <= 0 ? 0 : Math.pow(v, 1.6);
+    try {
+      this.master.gain.setTargetAtTime(g, this.ctx.currentTime, 0.03);
+    } catch {
+      this.master.gain.value = g;
+    }
   }
 
   ensureCtx() {
@@ -65,6 +86,7 @@ export class AudioEngine {
       this.ctx = new AC({ latencyHint: 'interactive' });
       this.master = this.ctx.createGain();
       this.master.connect(this.ctx.destination);
+      this.applyVolume();
     }
     return this.ctx;
   }
@@ -223,15 +245,31 @@ export class AudioEngine {
 
   async openMic() {
     if (this.micState === 'on' && this.stream && this.stream.active) return true;
+    // طلب واحد بنفس الوقت (تيليجرام أندرويد يطلع نافذة إذن لكل طلب)
+    if (this.micPromise) return this.micPromise;
+    this.micPromise = this.openMicNow().finally(() => {
+      this.micPromise = null;
+    });
+    return this.micPromise;
+  }
+
+  async openMicNow() {
     this.ensureCtx();
+    if (this.stream) this.closeMic();
     this.micState = 'asking';
     try {
+      // بدون معالجة مكالمات (إلغاء الصدى) حتى ما يتحوّل الصوت لوضع المكالمة ويوطى التشغيل
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 },
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
       });
     } catch (e) {
       this.micState = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError') ? 'denied' : 'error';
       return false;
+    }
+    for (const tr of this.stream.getAudioTracks()) {
+      tr.addEventListener('ended', () => {
+        if (this.stream && !this.stream.active) this.closeMic();
+      });
     }
     if (this.ctx.state !== 'running') {
       try {
@@ -291,11 +329,12 @@ export class AudioEngine {
   }
 
   /**
-   * نطفي المايك بعد كل تسجيل (iOS وأندرويد): المايك المفتوح يحوّل الصوت لوضع المكالمة
-   * فيطلع التشغيل واطي أو من سماعة الأذن. ينفتح من جديد قبل التسجيل الجاي تلقائيًا.
+   * نسكّر المايك بعد كل تسجيل؟ بالآيفون إي (تيليجرام ما يعيد طلب الإذن هناك).
+   * بأندرويد لا: تيليجرام يطلع نافذة إذن كل مرة ينفتح المايك، فيبقى مفتوح طول ما التطبيق مفتوح.
+   * اللاعب يكدر يغيّرها من الإعدادات.
    */
   get releaseAfterRecord() {
-    return true;
+    return releaseMicAfterRecord();
   }
 
   pushChunk(t, d) {
@@ -366,9 +405,9 @@ export class AudioEngine {
   }
 
   sfx(name, gain = 1) {
-    if (!this.running || this.muted) return;
+    if (!this.running || this.muted || settings.sfx <= 0) return;
     if (!this.sfxBufs) this.buildSfx();
     const b = this.sfxBufs[name];
-    if (b) this.play(b, null, { gain: 0.7 * gain });
+    if (b) this.play(b, null, { gain: 0.7 * gain * settings.sfx });
   }
 }

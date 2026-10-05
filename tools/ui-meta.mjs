@@ -108,11 +108,43 @@ async function newPage(tgUser) {
               console.log('[tg] invoice ' + url);
               window.__payInvoice(url).then((s) => cb && cb(s));
             },
-            safeAreaInset: { top: 0, bottom: 0, left: 0, right: 0 },
-            contentSafeAreaInset: { top: 0, bottom: 0, left: 0, right: 0 },
+            // ملء الشاشة مثل تيليجرام أندرويد: شريط الحالة 32 + أزرار تيليجرام 56 بأعلى الجهاز
+            isFullscreen: true,
+            safeAreaInset: { top: 32, bottom: 16, left: 0, right: 0 },
+            contentSafeAreaInset: { top: 56, bottom: 0, left: 0, right: 0 },
             viewportStableHeight: 0,
+            CloudStorage: {
+              _m: JSON.parse(sessionStorage.getItem('__cloud') || '{}'),
+              setItem(k, v, cb) {
+                this._m[k] = v;
+                sessionStorage.setItem('__cloud', JSON.stringify(this._m));
+                cb && cb(null, true);
+              },
+              getItem(k, cb) {
+                cb && cb(null, this._m[k] || '');
+              },
+            },
           },
         };
+        // أزرار تيليجرام فوق (ما تدور ويا اللعبة) — حتى نشوف شنو يغطي
+        document.addEventListener('DOMContentLoaded', () => {
+          const bar = document.createElement('div');
+          bar.id = '__tgbar';
+          bar.innerHTML = '<span>✕ Close</span><span>⌄ ⋮</span>';
+          bar.style.cssText = 'position:fixed;left:0;right:0;top:32px;height:56px;display:flex;justify-content:space-between;align-items:center;padding:0 10px;z-index:99999;pointer-events:none;font:600 15px sans-serif;color:#fff';
+          for (const sp of bar.children) sp.style.cssText = 'background:rgba(40,40,40,.85);border-radius:20px;padding:8px 14px';
+          document.documentElement.appendChild(bar);
+        });
+        // كم مرة طلبت اللعبة المايك (تيليجرام أندرويد يسأل عن الإذن كل مرة)
+        window.__gum = 0;
+        const md = navigator.mediaDevices;
+        if (md && md.getUserMedia) {
+          const orig = md.getUserMedia.bind(md);
+          md.getUserMedia = (c) => {
+            window.__gum++;
+            return orig(c);
+          };
+        }
       },
       { initData, user: tgUser },
     );
@@ -145,12 +177,44 @@ const tap = async (page, selector, nth = 0) => {
   const el = els[nth];
   if (!el) throw new Error('ماكو ' + selector + ' #' + nth);
   await el.scrollIntoViewIfNeeded().catch(() => null);
+  // نستنى أنيميشن فتح اللوحة يخلص (وإلا مكان الزر يتغيّر وقت اللمسة)
+  await el
+    .evaluate((e) =>
+      Promise.all(
+        document
+          .getAnimations()
+          .filter((a) => {
+            const t = a.effect && a.effect.target;
+            return t && t.contains && t.contains(e) && a.effect.getComputedTiming().iterations !== Infinity;
+          })
+          .map((a) => a.finished.catch(() => null)),
+      ),
+    )
+    .catch(() => null);
   const box = await el.boundingBox();
   await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
 };
 const profile = (page) => page.evaluate(() => window.__qd.meta.profile);
 const sawToast = (re, from = 0) => toasts.slice(from).some((t) => re.test(t));
 const waitFor = async (page, fn, arg, ms = 8000) => page.waitForFunction(fn, arg, { timeout: ms }).then(() => true).catch(() => false);
+// أعلى الجهاز: شريط الحالة 32 + أزرار تيليجرام 56 — ما لازم يكون فيها أي زر
+const HEADER_Y = 88;
+async function clearOfHeader(page, sel, label) {
+  const boxes = await page.$$eval(sel, (els) =>
+    els.map((e) => {
+      const r = e.getBoundingClientRect();
+      return { y: r.top, b: r.bottom, w: r.width, h: r.height, H: innerHeight };
+    }),
+  );
+  const under = boxes.filter((b) => b.w > 0 && b.y < HEADER_Y - 0.5);
+  // الطرف الثاني (جوّه الجهاز): لا ينكص زر برا الشاشة
+  const cut = boxes.filter((b) => b.w > 0 && b.b > b.H - 15.5);
+  check(
+    boxes.length > 0 && under.length === 0 && cut.length === 0,
+    `${label}: بعيد عن أزرار تيليجرام (${boxes.length}${under.length ? ' — ' + under.length + ' تحتها، أعلى y=' + Math.round(Math.min(...under.map((b) => b.y))) : ''}${cut.length ? ' — ' + cut.length + ' مكصوص' : ''})`,
+  );
+}
+
 /** يضغط زر داخل كارت غرض بالمتجر حسب اسمه */
 async function cardBtn(page, itemName, cls) {
   const idx = await page.evaluate(
@@ -185,18 +249,21 @@ async function cardBtn(page, itemName, cls) {
 
 /* ====================================================== لاعب تيليجرام */
 const page = await newPage(user);
+const cfg = await (await fetch(BASE + '/api/config')).json();
 await page.exposeFunction('__payInvoice', async (url) => {
   const payload = Buffer.from(url.split('$invoice_')[1] || '', 'hex').toString();
   log('💳 فاتورة', payload);
   const from = { id: UID, first_name: user.first_name };
-  await update({ pre_checkout_query: { id: 'pcq' + upd, from, currency: 'XTR', total_amount: 99, invoice_payload: payload } });
+  const sku = payload.startsWith('st:') ? payload.split(':')[2] : 'pass';
+  const amount = sku === 'pass' ? cfg.passPrice : cfg.packs.find((p) => p.sku === sku).stars;
+  await update({ pre_checkout_query: { id: 'pcq' + upd, from, currency: 'XTR', total_amount: amount, invoice_payload: payload } });
   await update({
     message: {
       message_id: ++upd,
       date: Math.floor(Date.now() / 1000),
       from,
       chat: { id: UID, type: 'private' },
-      successful_payment: { currency: 'XTR', total_amount: 99, invoice_payload: payload, telegram_payment_charge_id: 'ui-charge-' + UID, provider_payment_charge_id: '' },
+      successful_payment: { currency: 'XTR', total_amount: amount, invoice_payload: payload, telegram_payment_charge_id: 'ui-charge-' + UID + '-' + upd, provider_payment_charge_id: '' },
     },
   });
   return 'paid';
@@ -209,12 +276,15 @@ const chip = await page.$eval('.profile-chip', (e) => e.innerText);
 check(/⭐ 1/.test(chip) && /🎤 0/.test(chip), 'شارة الحساب: لفل ومايكات');
 check((await page.$$('.menu-side .side-btn')).length === 3, 'أزرار المتجر/الباس/مجاني بالقائمة');
 check(!!(await page.$('.menu-side .side-btn.dot')), 'نقطة على «مجاني» (الصندوق متاح)');
+await clearOfHeader(page, '.menu-side .side-btn, .menu-btns button, .menu-top button, .profile-chip', 'أزرار القائمة');
 await shot(page, 'menu');
 
 // ---------------- المتجر
 await tap(page, '.menu-side .side-btn', 0);
 await page.waitForSelector('.panel.shop');
 await page.waitForTimeout(600);
+await clearOfHeader(page, '.panel.shop .xbtn', 'زر ✕ المتجر');
+await clearOfHeader(page, '.panel.shop .tab', 'تبويبات المتجر');
 const nCards = await page.$$eval('.it-card', (c) => c.length);
 check(nCards === 16, `قسم الشخصيات فيه 16 شخصية (${nCards})`);
 await shot(page, 'shop-skins');
@@ -248,6 +318,17 @@ await shot(page, 'shop-mics-after');
 p = await profile(page);
 check(p.daily.coins === 4 && p.daily.box === 0, `العدّاد: باقي ${p.daily.coins} مايكات مجانية، صندوق ${p.daily.box}`);
 log('   مايكات بعد الصندوق', p.mics, '(قبل', before + ')');
+
+// ---------------- باقة مايكات بنجوم تيليجرام
+{
+  const n = await page.$$eval('.earn-card.star', (c) => c.length);
+  check(n === 4, `4 باقات مايكات بالنجوم (${n})`);
+  const m0 = (await profile(page)).mics;
+  await tap(page, '.earn-card.star .it-btn.star', 0);
+  check(await waitFor(page, (m) => window.__qd.meta.profile.mics === m + 300, m0, 20000), 'دفع 15⭐ → +300 مايك');
+  await page.waitForTimeout(600);
+  await shot(page, 'shop-mics-stars');
+}
 
 // ---------------- فتح إكسسوار بإعلان ثم لبسه
 await tap(page, '.tabs .tab', 1);
@@ -334,6 +415,9 @@ await tap(page, '.menu-side .side-btn.pass');
 await page.waitForSelector('.panel.pass');
 await page.waitForTimeout(700);
 check((await page.$$('.rp-col')).length === 100, '100 لفل بالمسار');
+check(!!(await page.$('.pass-head .btn.gold.plus')), 'زر «مميز + 10 لفلات»');
+check((await page.$$('.lv-buy .it-btn.star')).length === 4, '4 باقات لفلات بالنجوم');
+await clearOfHeader(page, '.panel.pass .xbtn', 'زر ✕ الباس');
 await shot(page, 'pass');
 await tap(page, '.pass-prog .it-btn.ad');
 check(await waitFor(page, () => window.__qd.meta.profile.pass.xp >= 60), 'إعلان الباس: +60 خبرة');
@@ -342,16 +426,79 @@ await tap(page, '.pass-head .btn.gold');
 check(await waitFor(page, () => window.__qd.meta.profile.pass.premium, null, 20000), 'الدفع بالنجوم فعّل الباس المميز');
 await page.waitForTimeout(600);
 check(!!(await page.$('.prem-badge')), 'شارة «مميز — 100 لفل»');
+{
+  const lv = (await profile(page)).pass.level;
+  await tap(page, '.lv-buy .it-btn.star', 0);
+  check(await waitFor(page, (l) => window.__qd.meta.profile.pass.level === l + 1, lv, 20000), `شراء لفل باس بـ10⭐ (${lv} → ${lv + 1})`);
+  await page.waitForTimeout(500);
+}
 await shot(page, 'pass-premium');
 await tap(page, '.panel.pass .xbtn');
 await page.waitForTimeout(1500);
+
+// ---------------- الإعدادات ⚙️
+await tap(page, '.menu-top .gear');
+await page.waitForSelector('.panel.settings');
+await page.waitForTimeout(500);
+await clearOfHeader(page, '.panel.settings .xbtn', 'زر ✕ الإعدادات');
+await shot(page, 'settings');
+const segTap = async (key, v) => {
+  const idx = await page.evaluate(
+    ({ key, v }) => {
+      const rows = [...document.querySelectorAll('.set-row')];
+      const all = [...document.querySelectorAll('.seg-btn')];
+      for (const r of rows) {
+        const b = r.querySelector(`.seg-btn[data-v="${v}"]`);
+        if (b && r.textContent.includes(key)) return all.indexOf(b);
+      }
+      return -1;
+    },
+    { key, v: String(v) },
+  );
+  if (idx < 0) throw new Error('ماكو ' + key + '=' + v);
+  await tap(page, '.seg-btn', idx);
+  await page.waitForTimeout(400);
+};
+await segTap('جودة', 'low');
+let q = await page.evaluate(() => ({ mode: window.__qd.stage.qualityMode, pr: window.__qd.stage.renderer.getPixelRatio(), aa: window.__qd.stage.aa }));
+check(q.mode === 'low' && q.pr === 0.75 && q.aa === false, `جودة واطية: ${JSON.stringify(q)}`);
+await segTap('الفريمات', 30);
+const tgl = await page.$$('.set-row .toggle');
+await tap(page, '.set-row .toggle', 0); // عدّاد الفريمات
+await page.waitForTimeout(2600);
+const fpsTxt = await page.$eval('#fps', (e) => e.textContent).catch(() => '');
+const fpsN = parseInt(fpsTxt, 10);
+const capMs = await page.evaluate(() => window.__qd.stage.minFrameMs);
+// الرسم هنا برمجي (SwiftShader) وبطيء، فنتأكد من الحد والعدّاد مو من الرقم نفسه
+check(Math.abs(capMs - 1000 / 30) < 0.01 && fpsN > 0 && fpsN <= 34, `حد 30 فريم مضبوط والعدّاد يشتغل («${fpsTxt}»)`);
+await tap(page, '.step-btn', 0);
+await tap(page, '.step-btn', 0);
+const vol = await page.evaluate(() => JSON.parse(localStorage.getItem('qd_settings')).volume);
+check(Math.abs(vol - 0.7) < 0.011, `الصوت نزل لـ70% وانحفظ (${vol})`);
+const cloud = await page.evaluate(() => JSON.parse(sessionStorage.getItem('__cloud') || '{}').settings || '');
+check(/"quality":"low"/.test(cloud), 'الإعدادات انحفظت بحساب تيليجرام (CloudStorage)');
+await shot(page, 'settings-changed');
+await segTap('جودة', 'max');
+q = await page.evaluate(() => ({ mode: window.__qd.stage.qualityMode, aa: window.__qd.stage.aa, canvas: !!document.querySelector('canvas#stage') }));
+check(q.mode === 'max' && q.aa === true && q.canvas, `أعلى جودة: نعومة حواف بكانفس جديد ${JSON.stringify(q)}`);
+await segTap('الفريمات', 60);
+await tap(page, '.panel.settings .xbtn');
+await page.waitForTimeout(800);
+check(!(await page.$('.panel.settings')), 'الإعدادات تسكّرت');
+await shot(page, 'menu-fps');
 
 if (PLAY) {
   // ---------------- لعبة كاملة (وحدي) → مكافآت النهاية + إعلان كامل الشاشة + ضاعف
   await tap(page, '.menu-btns .btn.pink');
   await page.waitForSelector('#lobbyBar .room-code b', { timeout: 15000 });
   await page.waitForTimeout(2500);
+  await clearOfHeader(page, '#exitBtn, #setBtn, #lobbyBar button, #lobbyBar .room-code', 'أزرار الغرفة');
   await shot(page, 'lobby');
+  await tap(page, '#setBtn');
+  await page.waitForSelector('.panel.settings');
+  check(!!(await page.$('.set-row .seg.off')), 'داخل الغرفة: اللغة تتغيّر بس من القائمة');
+  await tap(page, '.panel.settings .xbtn');
+  await page.waitForTimeout(500);
   const look = await page.evaluate(() => {
     const g = window.__qd.game;
     const me = g.st.players.find((x) => x.uid === g.me);
@@ -393,6 +540,9 @@ if (PLAY) {
     await page.waitForTimeout(400);
   }
   await page.waitForTimeout(1800);
+  const gum = await page.evaluate(() => window.__gum);
+  check(gum === 1, `المايك انطلب مرة وحدة بس طول اللعبة (getUserMedia × ${gum})`);
+  await clearOfHeader(page, '.final-btns button', 'أزرار النهاية');
   await shot(page, 'final');
   check(!!(await page.$('.rewards')), 'شريط المكافآت بالنهاية');
   const rw = await page.$eval('.rewards', (e) => e.innerText).catch(() => '');
@@ -410,6 +560,55 @@ if (PLAY) {
     await shot(page, 'final-doubled');
   }
 }
+
+// ---------------- اللغة الروسية
+if (PLAY) {
+  await tap(page, '.final-btns .btn.ghost');
+  await page.waitForTimeout(1500);
+}
+await tap(page, '.menu-top .gear');
+await page.waitForSelector('.panel.settings');
+await Promise.all([page.waitForEvent('load', { timeout: 20000 }), tap(page, '.seg-btn[data-v="ru"]')]);
+await page.waitForTimeout(3000);
+const ru = await page.evaluate(() => ({ dir: document.documentElement.dir, lang: document.documentElement.lang, btn: (document.querySelector('.menu-btns .btn.pink') || {}).textContent, title: document.title }));
+check(ru.dir === 'ltr' && ru.lang === 'ru' && /Играть с друзьями/.test(ru.btn || ''), `الروسي: ${JSON.stringify(ru)}`);
+await clearOfHeader(page, '.menu-side .side-btn, .menu-btns button, .menu-top button, .profile-chip', 'أزرار القائمة (روسي)');
+await shot(page, 'ru-menu');
+await tap(page, '.menu-side .side-btn', 0);
+await page.waitForSelector('.panel.shop');
+await page.waitForTimeout(700);
+await shot(page, 'ru-shop');
+await tap(page, '.tabs .tab', 1);
+await page.waitForTimeout(600);
+await shot(page, 'ru-shop-head');
+await tap(page, '.tabs .tab', 4);
+await page.waitForTimeout(600);
+await shot(page, 'ru-shop-mics');
+await tap(page, '.panel.shop .xbtn');
+await page.waitForTimeout(900);
+await tap(page, '.menu-side .side-btn.pass');
+await page.waitForSelector('.panel.pass');
+await page.waitForTimeout(700);
+await shot(page, 'ru-pass');
+await tap(page, '.panel.pass .xbtn');
+await page.waitForTimeout(900);
+await tap(page, '.menu-top .gear');
+await page.waitForSelector('.panel.settings');
+await page.waitForTimeout(500);
+await shot(page, 'ru-settings');
+await tap(page, '.panel.settings .xbtn');
+await page.waitForTimeout(500);
+await tap(page, '.menu-top .help');
+await page.waitForTimeout(700);
+await shot(page, 'ru-help');
+await tap(page, '.panel.help .xbtn');
+await page.waitForTimeout(700);
+await tap(page, '.menu-btns .btn.pink');
+await page.waitForSelector('#lobbyBar .room-code b', { timeout: 15000 });
+await page.waitForTimeout(2000);
+await shot(page, 'ru-lobby');
+const missingRu = errors.filter((e) => /ru missing/.test(e));
+check(missingRu.length === 0, `كل النصوص مترجمة (${missingRu.length} ناقص)${missingRu.length ? ': ' + missingRu.slice(0, 5).join(' | ') : ''}`);
 
 const me = await api('/api/me');
 log('الحساب بالسيرفر:', JSON.stringify({ mics: me.profile.mics, level: me.profile.level.level, pass: me.profile.pass, equip: me.profile.equip }));

@@ -1,6 +1,7 @@
 // عناصر الواجهة (DOM) فوق المسرح: الكروت، اللافتات، شريط الموجة، القوائم.
 
 import { portrait, SKINS } from './stage.js';
+import { t } from './i18n.js';
 
 export const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -59,7 +60,7 @@ export function clearCenter() {
 }
 
 /** «X / 100» بالوردي الغامق تحت المايك — مثل الأصلية. */
-export function scoreBanner(raw, mult = 1) {
+export function scoreBanner(raw, mult = 1, bonus = 0) {
   const c = $('#center');
   const b = el(
     'div',
@@ -68,6 +69,7 @@ export function scoreBanner(raw, mult = 1) {
     el('span', { class: 'slash' }, '/'),
     el('span', { class: 'num' }, '100'),
     mult > 1 ? el('span', { class: 'mult' }, `×${mult}`) : null,
+    bonus > 0 ? el('span', { class: 'mult bonus' }, `+${bonus}`) : null,
   );
   c.appendChild(b);
   setTimeout(() => {
@@ -105,7 +107,7 @@ function letterPieces(word) {
   return cs.map((c, i) => (i > 0 && joinsNext[i - 1] ? '‍' : '') + c + (joinsNext[i] ? '‍' : ''));
 }
 
-export function reproduceBanner(ms = 1600, lines = ['حاول..', 'تقلّدها!']) {
+export function reproduceBanner(ms = 1600, lines = [t('حاول..'), t('تقلّدها!')]) {
   const c = $('#center');
   c.querySelectorAll('.repro').forEach((x) => x.remove());
   let k = 0;
@@ -164,8 +166,9 @@ export function renderCards(players, { me, host, gains = {}, badges = {} } = {})
       p.lvl ? el('div', { class: 'pc-lvl' }, String(p.lvl)) : null,
       el('div', { class: 'pc-name' }, p.name),
       el('div', { class: 'pc-score' }, String(p.score)),
-      p.uid === host ? el('div', { class: 'pc-host', title: 'المضيف' }, '👑') : null,
+      p.uid === host ? el('div', { class: 'pc-host', title: t('المضيف') }, '👑') : null,
       p.mult > 1 ? el('div', { class: 'pc-mult' }, `×${p.mult}`) : null,
+      p.bonus > 0 ? el('div', { class: 'pc-bonus' }, `+${p.bonus}`) : null,
       badges[p.uid] ? el('div', { class: 'pc-badge' }, badges[p.uid]) : null,
       gains[p.uid] ? el('div', { class: 'pc-gain' }, `+${gains[p.uid]}`) : null,
     );
@@ -338,7 +341,7 @@ export function closeOverlay() {
   o.innerHTML = '';
 }
 
-export function confirmDialog(text, yes = 'إي', no = 'لا') {
+export function confirmDialog(text, yes = t('إي'), no = t('لا')) {
   return new Promise((resolve) => {
     const box = el(
       'div',
@@ -368,7 +371,7 @@ export function keypad(onSubmit, onClose) {
   let code = '';
   let busy = false;
   const disp = el('div', { class: 'kp-display' });
-  const hint = el('div', { class: 'hint kp-hint' }, 'الكود 5 أرقام — تلگاه عند صاحب الغرفة');
+  const hint = el('div', { class: 'hint kp-hint' }, t('الكود 5 أرقام — تلگاه عند صاحب الغرفة'));
   const render = () => {
     disp.innerHTML = '';
     for (let i = 0; i < 5; i++) disp.appendChild(el('span', { class: 'kp-digit' + (code[i] ? ' on' : '') }, code[i] || ''));
@@ -377,17 +380,17 @@ export function keypad(onSubmit, onClose) {
   const submit = async () => {
     if (busy || code.length !== 5) return;
     busy = true;
-    hint.textContent = 'جاري البحث عن الغرفة…';
+    hint.textContent = t('جاري البحث عن الغرفة…');
     hint.classList.remove('err');
     let res;
     try {
       res = await onSubmit(code);
     } catch (e) {
-      res = (e && e.message) || 'صار خطأ بالاتصال';
+      res = t((e && e.message) || 'صار خطأ بالاتصال');
     }
     busy = false;
     if (res === true) return;
-    hint.textContent = typeof res === 'string' ? res : 'ماكو غرفة بهالكود';
+    hint.textContent = typeof res === 'string' ? res : t('ماكو غرفة بهالكود');
     hint.classList.add('err');
     disp.classList.remove('shake');
     void disp.offsetWidth;
@@ -421,7 +424,7 @@ export function keypad(onSubmit, onClose) {
     'div',
     { class: 'panel keypad' },
     el('button', { class: 'xbtn', onclick: onClose }, '✕'),
-    el('div', { class: 'kp-side' }, el('div', { class: 'panel-title' }, 'ادخل كود الغرفة'), disp, hint),
+    el('div', { class: 'kp-side' }, el('div', { class: 'panel-title' }, t('ادخل كود الغرفة')), disp, hint),
     pad,
   );
 }
@@ -440,12 +443,12 @@ export function leaderboardPanel(rows, meUid, onClose) {
           el('span', { class: 'lb-wins' }, `🏆 ${r.wins}`),
         ),
       )
-    : [el('div', { class: 'hint center' }, 'بعد ماكو أحد — كون أول واحد! 🎤')];
+    : [el('div', { class: 'hint center' }, t('بعد ماكو أحد — كون أول واحد! 🎤'))];
   return el(
     'div',
     { class: 'panel board' },
     el('button', { class: 'xbtn', onclick: onClose }, '✕'),
-    el('div', { class: 'panel-title' }, '🏆 المتصدرين'),
+    el('div', { class: 'panel-title' }, t('🏆 المتصدرين')),
     el('div', { class: 'lb-list' }, list),
   );
 }

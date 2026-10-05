@@ -7,7 +7,8 @@ import { handleUpdate, Tg } from './telegram.js';
 import { VERSION } from '../public/js/shared.js';
 import { LIBRARY_BY_SLUG } from './library-sounds.js';
 import { seasonOf } from '../public/js/catalog.js';
-import { passPrice, passInvoice } from './pass.js';
+import { passPrice, passInvoice, packInvoice } from './pass.js';
+import { STAR_PACKS, packPrice } from '../public/js/catalog.js';
 
 export { Room, Hub };
 
@@ -185,6 +186,7 @@ async function api(request, env, ctx, url) {
       guests: String(env.ALLOW_GUEST || 'true') !== 'false',
       ads: adsConfig(env),
       passPrice: passPrice(env),
+      packs: STAR_PACKS.map((p) => ({ ...p, stars: packPrice(p, passPrice(env)) })),
     });
   }
 
@@ -213,7 +215,7 @@ async function api(request, env, ctx, url) {
   }
 
   // ---------------- المتجر والإعلانات والباس (لاعبين تيليجرام بس)
-  if (path.startsWith('/api/shop/') || path.startsWith('/api/ads/') || path === '/api/pass/invoice') {
+  if (path.startsWith('/api/shop/') || path.startsWith('/api/ads/') || path === '/api/pass/invoice' || path === '/api/stars/invoice') {
     if (request.method !== 'POST') return json({ error: 'method' }, 405);
     const body = await readAuth(request);
     const user = await identify(env, body);
@@ -238,7 +240,18 @@ async function api(request, env, ctx, url) {
       const season = seasonOf();
       const can = await hub.canBuyPass(user.uid, season);
       if (!can.ok) return json({ error: can.error }, 400);
-      const link = await new Tg(token, env.TG_API_BASE).call('createInvoiceLink', passInvoice(env, user.uid, season));
+      const link = await new Tg(token, env.TG_API_BASE).call('createInvoiceLink', passInvoice(env, user.uid, season, body.lang === 'ru' ? 'ru' : 'ar'));
+      return json({ ok: true, link });
+    }
+    if (path === '/api/stars/invoice') {
+      if (!token) return json({ error: 'البوت ما مربوط' }, 400);
+      const sku = String(body.sku || '');
+      const season = seasonOf();
+      const can = await hub.canBuyPack(user.uid, sku, season);
+      if (!can.ok) return json({ error: can.error }, 400);
+      const inv = packInvoice(env, user.uid, sku, season, body.lang === 'ru' ? 'ru' : 'ar');
+      if (!inv) return json({ error: 'هاي الباقة مو موجودة' }, 400);
+      const link = await new Tg(token, env.TG_API_BASE).call('createInvoiceLink', inv);
       return json({ ok: true, link });
     }
     return json({ error: 'not_found' }, 404);

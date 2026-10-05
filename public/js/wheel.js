@@ -1,6 +1,7 @@
 // عجلة الحظ (SVG) مع دوران محسوب يوكف على القطعة اللي يحددها السيرفر.
 
 import { WHEEL } from './shared.js';
+import { t } from './i18n.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const SEG = 360 / WHEEL.length;
@@ -75,16 +76,17 @@ export class Wheel {
       // «عملة» الأيقونة: فضية شفافة ونجمة ذهبية للنقاط (مثل الأصلية)
       svg('circle', { cx: 0, cy: -71, r: 16.5, fill: 'url(#wcoin)', stroke: 'rgba(255,255,255,0.9)', 'stroke-width': 1.6 }, g);
       svg('circle', { cx: 0, cy: -71, r: 12.5, fill: 'none', stroke: 'rgba(80,86,110,0.35)', 'stroke-width': 1.2 }, g);
-      if (s.kind === 'sab') {
+      if (s.kind === 'sab' || s.kind === 'swap') {
         const ic = svg('text', { x: 0, y: -65.6, 'text-anchor': 'middle', 'font-size': 15, class: 'wheel-icon' }, g);
         ic.textContent = s.icon;
       } else {
         svg('path', { d: starPath(0, -71, 11, 5), fill: '#ffc21a', stroke: '#c96f00', 'stroke-width': 1.6, 'stroke-linejoin': 'round' }, g);
         svg('path', { d: starPath(-1.2, -72.6, 5, 2.2), fill: '#fff2a8', opacity: 0.8 }, g);
       }
-      const arabic = /[\u0600-\u06FF]/.test(s.label);
-      const lb = svg('text', { x: 0, y: -42.5, 'text-anchor': 'middle', 'font-size': s.label.length > 4 ? 9.5 : 11.5, class: 'wheel-label', direction: arabic ? 'rtl' : 'ltr' }, g);
-      lb.textContent = s.label;
+      const label = t(s.label);
+      const arabic = /[\u0600-\u06FF]/.test(label);
+      const lb = svg('text', { x: 0, y: -42.5, 'text-anchor': 'middle', 'font-size': label.length > 6 ? 8 : label.length > 4 ? 9.5 : 11.5, class: 'wheel-label', direction: arabic ? 'rtl' : 'ltr' }, g);
+      lb.textContent = label;
     });
     // اللمبات
     for (let i = 0; i < 16; i++) {
