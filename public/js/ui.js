@@ -184,7 +184,7 @@ export function reproduceBanner(ms = 1600, lines = [t('حاول..'), t('تقلّ
 
 /* ------------------------------------------------------------ الكروت */
 const CARD_TILT = [-2, 1.5, -1, 2, 0];
-export function renderCards(players, { me, host, gains = {}, badges = {} } = {}) {
+export function renderCards(players, { me, host, gains = {}, badges = {}, muted = null } = {}) {
   const wrap = $('#cards');
   const n = players.length;
   const prev = new Map([...wrap.children].map((c) => [c.dataset.uid, c]));
@@ -209,6 +209,9 @@ export function renderCards(players, { me, host, gains = {}, badges = {} } = {})
       p.bonus > 0 ? el('div', { class: 'pc-bonus' }, `+${p.bonus}`) : null,
       badges[p.uid] ? el('div', { class: 'pc-badge' }, badges[p.uid]) : null,
       gains[p.uid] ? el('div', { class: 'pc-gain' }, `+${gains[p.uid]}`) : null,
+      // مكتوم عندي (الدردشة الصوتية)
+      muted && p.uid !== me && muted.has(p.uid) ? el('div', { class: 'pc-mute' }, '🔇') : null,
+      el('div', { class: 'pc-talk' }, '🎙️'),
     );
     const old = prev.get(p.uid);
     if (old && old.querySelector('.pc-score').textContent !== String(p.score)) card.classList.add('bump');
@@ -345,11 +348,22 @@ export function showMeme(sound, entry) {
   } else if (sound && sound.img) {
     media = el('img', { src: sound.img, alt: '' });
   }
-  if (!media) {
+  // صوت ضافه لاعب: صورته واسمه يطلعون ويا الصوت
+  const credit =
+    sound && sound.by
+      ? el(
+          'div',
+          { class: 'meme-by' },
+          sound.img ? el('img', { src: sound.img, alt: '' }) : el('span', { class: 'mb-ph' }, '🎙️'),
+          el('div', {}, el('small', {}, t('🎙️ صوت من')), el('b', {}, sound.by)),
+        )
+      : null;
+  if (!media && !credit) {
     m.className = '';
     return null;
   }
-  m.appendChild(media);
+  if (media) m.appendChild(media);
+  if (credit) m.appendChild(credit);
   m.className = 'show';
   return media;
 }

@@ -1,4 +1,4 @@
-// الكائن المركزي: اللاعبين والترتيب، الأصوات المضافة من البوت، وإعدادات الـwebhook.
+// الكائن المركزي: اللاعبين والترتيب، الأصوات (المكتبة والمضافة والمقترحة)، الغرف العامة، لوحة المطوّر، وإعدادات الـwebhook.
 
 import { DurableObject } from 'cloudflare:workers';
 import { BUILTIN_SOUNDS } from './builtin-sounds.js';
@@ -49,6 +49,51 @@ export class Hub extends DurableObject {
         code TEXT PRIMARY KEY, n INTEGER DEFAULT 0, phase TEXT DEFAULT 'lobby', ready INTEGER DEFAULT 0,
         held INTEGER DEFAULT 0, heldAt INTEGER DEFAULT 0, startsAt INTEGER DEFAULT 0, created INTEGER, at INTEGER)`,
     );
+    const addCols = (table, cols) => {
+      for (const c of cols) {
+        try {
+          this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${c}`);
+        } catch {
+          /* موجود */
+        }
+      }
+    };
+    // قائمة الغرف العامة: اسم المضيف واللاعبين
+    addCols('mm', ["host TEXT DEFAULT ''", "players TEXT DEFAULT '[]'"]);
+    // الأصوات اللي يضيفها اللاعبين: منو ضافها (اسمه يطلع ويا الصوت)
+    addCols('sounds', ["by_uid TEXT DEFAULT ''", "by_name TEXT DEFAULT ''"]);
+    // اللي حظروا البوت ما توصلهم الإذاعة
+    addCols('joins', ['blocked INTEGER DEFAULT 0', "name TEXT DEFAULT ''"]);
+    // لوحة المطوّر: الحظر، الأصوات المقترحة، إحصائيات الأيام
+    this.sql.exec('CREATE TABLE IF NOT EXISTS banned (uid TEXT PRIMARY KEY, at INTEGER, reason TEXT, by TEXT)');
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS subs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT, name TEXT, username TEXT, title TEXT, file_id TEXT, media TEXT,
+        dur REAL DEFAULT 0, status TEXT DEFAULT 'pending', reason TEXT, created INTEGER, decided INTEGER, sound_id INTEGER, lang TEXT)`,
+    );
+    this.sql.exec('CREATE TABLE IF NOT EXISTS stats_day (day TEXT PRIMARY KEY, games INTEGER DEFAULT 0, plays INTEGER DEFAULT 0)');
+    // الترتيب صار بأعمدة خاصة (lb_*): أول مرة ننسخ النقاط القديمة
+    if (!this.getKV('lb_v1')) {
+      this.sql.exec('UPDATE users SET lb_points = points, lb_wins = wins, lb_games = games, lb_best = best');
+      this.setKV('lb_v1', '1');
+    }
+    this.sql.exec('CREATE INDEX IF NOT EXISTS users_lb ON users(lb_points DESC)');
+  }
+
+  /** يصحّي الـHub بعد ms (التنزيل والإذاعة يشتغلون بالخلفية بدفعات) — ما يأخّر منبّه أقرب */
+  async kick(ms = 100) {
+    const at = Date.now() + Math.max(50, ms);
+    const cur = await this.ctx.storage.getAlarm();
+    if (!cur || cur > at) await this.ctx.storage.setAlarm(at);
+  }
+
+  /** يوم بتوقيت الأدمن (YYYY-MM-DD) للإحصائيات */
+  dayKey(now = Date.now()) {
+    try {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: String(this.env.ADMIN_TZ || 'Asia/Baghdad').trim(), year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
+    } catch {
+      return new Date(now + 3 * 3600000).toISOString().slice(0, 10);
+    }
   }
 
   /* ---------------- kv */
@@ -61,23 +106,253 @@ export class Hub extends DurableObject {
     return true;
   }
 
-  /* ---------------- اللاعبين */
+  /* ---------------- اللاعبين والترتيب (أعمدة lb_* تتصفّر من لوحة المطوّر بدون ما تمس اللفلات) */
   me(uid) {
-    const row = this.sql.exec('SELECT games, wins, points, best FROM users WHERE id = ?', uid).toArray()[0];
+    const row = this.sql.exec('SELECT lb_games AS games, lb_wins AS wins, lb_points AS points, lb_best AS best FROM users WHERE id = ?', uid).toArray()[0];
     const stats = row || { games: 0, wins: 0, points: 0, best: 0 };
-    const rank = row ? this.sql.exec('SELECT COUNT(*) AS c FROM users WHERE points > ?', row.points).one().c + 1 : null;
+    const rank = row && row.games > 0 ? this.sql.exec('SELECT COUNT(*) AS c FROM users WHERE lb_points > ? AND lb_games > 0', row.points).one().c + 1 : null;
     return { ...stats, rank };
   }
 
   top(limit = 20) {
     return this.sql
-      .exec('SELECT id, name, photo, games, wins, points, best FROM users WHERE games > 0 ORDER BY points DESC LIMIT ?', Math.min(50, limit))
+      .exec(
+        `SELECT id, name, photo, lb_games AS games, lb_wins AS wins, lb_points AS points, lb_best AS best FROM users
+         WHERE lb_games > 0 AND id NOT IN (SELECT uid FROM banned) ORDER BY lb_points DESC LIMIT ?`,
+        Math.min(50, limit),
+      )
       .toArray();
   }
 
   /** results: [{uid, name, photo, score, guest}] → مكافآت كل لاعب تيليجرام */
   recordGame(results, winner, gkey = '') {
+    const plays = results.filter((r) => !r.guest).length;
+    this.sql.exec(
+      'INSERT INTO stats_day (day, games, plays) VALUES (?, 1, ?) ON CONFLICT(day) DO UPDATE SET games = games + 1, plays = plays + excluded.plays',
+      this.dayKey(),
+      plays,
+    );
     return this.eco.recordGame(results, winner, gkey);
+  }
+
+  /* ---------------- لوحة المطوّر: الحظر، الصيانة، الترتيب، الإحصائيات */
+
+  isBanned(uid) {
+    return !!this.sql.exec('SELECT 1 FROM banned WHERE uid = ?', String(uid)).toArray()[0];
+  }
+
+  /** للعامل: الصيانة والمحظورين (ينخزن بالذاكرة كم ثانية) */
+  flags() {
+    return { maint: this.getKV('maint') === '1', banned: this.sql.exec('SELECT uid FROM banned LIMIT 5000').toArray().map((r) => r.uid) };
+  }
+
+  ban(uid, reason = '', by = '') {
+    uid = String(uid);
+    if (!/^t\d+$/.test(uid)) return { ok: false };
+    this.sql.exec('INSERT OR REPLACE INTO banned (uid, at, reason, by) VALUES (?, ?, ?, ?)', uid, Date.now(), String(reason || '').slice(0, 200), String(by || ''));
+    return { ok: true, name: this.nameOf(uid) };
+  }
+
+  /** اسم اللاعب (من اللعبة، وإلا من أول مرة دخل البوت) */
+  nameOf(uid) {
+    const u = this.sql.exec('SELECT name FROM users WHERE id = ?', String(uid)).toArray()[0];
+    if (u && u.name) return u.name;
+    const j = this.sql.exec('SELECT name FROM joins WHERE uid = ?', String(uid)).toArray()[0];
+    return (j && j.name) || '';
+  }
+
+  unban(uid) {
+    return { ok: this.sql.exec('DELETE FROM banned WHERE uid = ?', String(uid)).rowsWritten > 0 };
+  }
+
+  bannedList(limit = 10) {
+    return this.sql
+      .exec(
+        "SELECT b.uid, b.at, b.reason, COALESCE(NULLIF(u.name, ''), j.name, '') AS name FROM banned b LEFT JOIN users u ON u.id = b.uid LEFT JOIN joins j ON j.uid = b.uid ORDER BY b.at DESC LIMIT ?",
+        limit,
+      )
+      .toArray();
+  }
+
+  setMaint(on) {
+    this.setKV('maint', on ? '1' : '0');
+    return on;
+  }
+
+  /** يصفّر المتصدرين بس (اللفلات والمايكات والمشتريات تبقى) */
+  resetLeaderboard() {
+    const n = this.sql.exec('SELECT COUNT(*) AS c FROM users WHERE lb_games > 0').one().c;
+    this.sql.exec('UPDATE users SET lb_points = 0, lb_wins = 0, lb_games = 0, lb_best = 0');
+    this.setKV('lb_reset_at', String(Date.now()));
+    return { ok: true, n };
+  }
+
+  adminStats() {
+    const now = Date.now();
+    const day = now - 86400000;
+    const week = now - 7 * 86400000;
+    const one = (q, ...a) => this.sql.exec(q, ...a).one();
+    const today = this.sql.exec('SELECT games, plays FROM stats_day WHERE day = ?', this.dayKey(now)).toArray()[0] || { games: 0, plays: 0 };
+    const tot = one('SELECT COALESCE(SUM(games), 0) AS g FROM stats_day');
+    const stars = one('SELECT COALESCE(SUM(stars), 0) AS s, COUNT(*) AS n FROM payments WHERE refunded = 0');
+    const stars24 = one('SELECT COALESCE(SUM(stars), 0) AS s FROM payments WHERE refunded = 0 AND at >= ?', day);
+    const c = this.soundCounts();
+    return {
+      users: one('SELECT COUNT(*) AS c FROM joins').c,
+      new24: one("SELECT COUNT(*) AS c FROM joins WHERE at >= ? AND src <> 'old'", day).c,
+      new7: one("SELECT COUNT(*) AS c FROM joins WHERE at >= ? AND src <> 'old'", week).c,
+      active24: one('SELECT COUNT(*) AS c FROM users WHERE last_seen >= ?', day).c,
+      players: one('SELECT COUNT(*) AS c FROM users WHERE games > 0').c,
+      gamesToday: today.games,
+      playsToday: today.plays,
+      gamesTotal: tot.g,
+      stars: stars.s,
+      payments: stars.n,
+      stars24: stars24.s,
+      sounds: c.active,
+      library: c.library.ready,
+      custom: c.custom.total,
+      subsPending: one("SELECT COUNT(*) AS c FROM subs WHERE status = 'pending'").c,
+      rooms: this.mmStats(),
+      banned: one('SELECT COUNT(*) AS c FROM banned').c,
+      reach: one('SELECT COUNT(*) AS c FROM joins WHERE blocked = 0 AND uid NOT IN (SELECT uid FROM banned)').c,
+      maint: this.getKV('maint') === '1',
+      notify: this.getKV('notify_join') !== '0',
+      bc: JSON.parse(this.getKV('bc_job') || 'null'),
+    };
+  }
+
+  /* ---------------- الإذاعة: رسالة الأدمن تنسخ لكل اللاعبين بدفعات (حدود تيليجرام وCloudflare) */
+
+  async startBroadcast({ from, msg, by }) {
+    if (this.getKV('bc_job')) return { error: 'running' };
+    const total = this.sql.exec('SELECT COUNT(*) AS c FROM joins WHERE blocked = 0 AND uid NOT IN (SELECT uid FROM banned)').one().c;
+    this.setKV('bc_job', JSON.stringify({ from, msg, by: String(by || ''), cursor: 0, sent: 0, failed: 0, total, started: Date.now() }));
+    await this.kick(150);
+    return { ok: true, total };
+  }
+
+  cancelBroadcast() {
+    const job = JSON.parse(this.getKV('bc_job') || 'null');
+    this.sql.exec('DELETE FROM kv WHERE k = ?', 'bc_job');
+    return { ok: !!job, job };
+  }
+
+  /** دفعة وحدة من الإذاعة. يرجع بعد كم ملي ثانية الدفعة الجاية (0 = خلصت) */
+  async bcTick() {
+    const job = JSON.parse(this.getKV('bc_job') || 'null');
+    if (!job) return 0;
+    const token = (this.env.TELEGRAM_BOT_TOKEN || '').trim();
+    if (!token) {
+      this.sql.exec('DELETE FROM kv WHERE k = ?', 'bc_job');
+      return 0;
+    }
+    const tg = new Tg(token, this.env.TG_API_BASE);
+    const batch = Math.max(1, Math.min(25, Number(this.env.BC_BATCH) || 20));
+    const rows = this.sql
+      .exec('SELECT rowid AS r, uid FROM joins WHERE rowid > ? AND blocked = 0 AND uid NOT IN (SELECT uid FROM banned) ORDER BY rowid LIMIT ?', job.cursor, batch)
+      .toArray();
+    let wait = Math.max(300, Number(this.env.BC_GAP_MS) || 1100);
+    for (const r of rows) {
+      try {
+        await tg.call('copyMessage', { chat_id: Number(String(r.uid).slice(1)), from_chat_id: job.from, message_id: job.msg });
+        job.sent++;
+      } catch (e) {
+        const m = String((e && e.message) || e);
+        const retry = /retry after (\d+)/i.exec(m);
+        if (retry || /Too Many Requests/i.test(m)) {
+          wait = (retry ? Number(retry[1]) : 3) * 1000 + 300;
+          break; // نفس اللاعب نعيده بالدفعة الجاية
+        }
+        job.failed++;
+        // حاظر البوت أو ما بدا وياه أصلًا (فتح اللعبة بس): ما نحاول وياه مرة ثانية
+        if (/blocked|deactivated|chat not found|initiate|user is deactivated|PEER_ID_INVALID|Forbidden/i.test(m)) this.sql.exec('UPDATE joins SET blocked = 1 WHERE uid = ?', r.uid);
+      }
+      job.cursor = r.r;
+    }
+    if (!rows.length) {
+      // خلصت: تقرير للأدمن اللي بداها
+      this.sql.exec('DELETE FROM kv WHERE k = ?', 'bc_job');
+      const secs = Math.round((Date.now() - job.started) / 1000);
+      const text = ['‏📢 خلصت الإذاعة', `‏✅ وصلت: ${job.sent}`, `‏❌ ما وصلت: ${job.failed} (حاظرين البوت أو ما بدوا وياه)`, `‏⏱️ ${secs} ثانية`].join('\n');
+      const to = job.by ? [job.by] : adminIds(this.env);
+      for (const id of to) await tg.call('sendMessage', { chat_id: id, text }).catch(() => null);
+      return 0;
+    }
+    this.setKV('bc_job', JSON.stringify(job));
+    return wait;
+  }
+
+  /* ---------------- أصوات يقترحها اللاعبين (البوت يستلمها والأدمن يقبل أو يرفض) */
+
+  /** يكدر يقترح هسه؟ (حد الانتظار وحد اليوم) */
+  subCheck(uid) {
+    const pending = this.sql.exec("SELECT COUNT(*) AS c FROM subs WHERE uid = ? AND status = 'pending'", uid).one().c;
+    if (pending >= 3) return { ok: false, error: 'pending' };
+    const today = this.sql.exec('SELECT COUNT(*) AS c FROM subs WHERE uid = ? AND created >= ?', uid, Date.now() - 86400000).one().c;
+    if (today >= 10) return { ok: false, error: 'daily' };
+    return { ok: true };
+  }
+
+  addSub({ uid, name, username, title, file_id, media, dur, lang }) {
+    this.sql.exec(
+      'INSERT INTO subs (uid, name, username, title, file_id, media, dur, status, created, lang) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      String(uid),
+      String(name || '').slice(0, 64),
+      String(username || '').slice(0, 40),
+      String(title || '').slice(0, 40),
+      String(file_id),
+      String(media || 'audio'),
+      Number(dur) || 0,
+      'pending',
+      Date.now(),
+      String(lang || ''),
+    );
+    return this.sql.exec('SELECT last_insert_rowid() AS id').one().id;
+  }
+
+  sub(id) {
+    return this.sql.exec('SELECT * FROM subs WHERE id = ?', Number(id)).toArray()[0] || null;
+  }
+
+  pendingSubs(limit = 5) {
+    return this.sql.exec("SELECT * FROM subs WHERE status = 'pending' ORDER BY id LIMIT ?", limit).toArray();
+  }
+
+  /**
+   * قبول صوت مقترح: ينضاف للعبة (الصوت بس — حتى لو فيديو)، وياه صورة اللي ضافه واسمه، وياخذ 50 مايك و50 خبرة باس.
+   */
+  approveSub(id, imgFileId = '') {
+    const s = this.sub(id);
+    if (!s) return { ok: false, error: 'notfound' };
+    if (s.status !== 'pending') return { ok: false, error: 'done', sub: s };
+    const now = Date.now();
+    this.sql.exec(
+      'INSERT INTO sounds (title, file_id, kind, img_file_id, dur, added_by, created, by_uid, by_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      s.title,
+      s.file_id,
+      'audio',
+      imgFileId || null,
+      s.dur || 0,
+      s.uid,
+      now,
+      s.uid,
+      s.name || '',
+    );
+    const soundId = this.sql.exec('SELECT last_insert_rowid() AS id').one().id;
+    this.sql.exec("UPDATE subs SET status = 'approved', decided = ?, sound_id = ? WHERE id = ?", now, soundId, s.id);
+    this.eco.ensureUser(s.uid, s.name || '');
+    this.eco.addMics(s.uid, 50);
+    const pass = this.eco.addPassXp(s.uid, 50, now);
+    return { ok: true, sub: { ...s, status: 'approved' }, soundId, pass };
+  }
+
+  rejectSub(id, reason = '') {
+    const s = this.sub(id);
+    if (!s) return { ok: false, error: 'notfound' };
+    if (s.status !== 'pending') return { ok: false, error: 'done', sub: s };
+    this.sql.exec("UPDATE subs SET status = 'rejected', decided = ?, reason = ? WHERE id = ?", Date.now(), String(reason || '').slice(0, 300), s.id);
+    return { ok: true, sub: { ...s, status: 'rejected', reason } };
   }
 
   /* ---------------- لاعبين جدد (إشعار للأدمن) */
@@ -90,8 +365,13 @@ export class Hub extends DurableObject {
     if (!u || !u.id) return { isNew: false };
     const uid = 't' + Number(u.id);
     const now = Date.now();
-    const r = this.sql.exec('INSERT OR IGNORE INTO joins (uid, at, src) VALUES (?, ?, ?)', uid, now, String(u.src || '').slice(0, 80));
-    if (!r.rowsWritten) return { isNew: false };
+    const name = [u.first_name, u.last_name].filter(Boolean).join(' ').trim().slice(0, 64);
+    const r = this.sql.exec('INSERT OR IGNORE INTO joins (uid, at, src, name) VALUES (?, ?, ?, ?)', uid, now, String(u.src || '').slice(0, 80), name);
+    if (!r.rowsWritten) {
+      // رجع يحچي ويا البوت: توصله الإذاعة مرة ثانية
+      if (u.fromBot) this.sql.exec('UPDATE joins SET blocked = 0 WHERE uid = ? AND blocked = 1', uid);
+      return { isNew: false };
+    }
     const n = this.sql.exec('SELECT COUNT(*) AS c FROM joins').one().c;
     if (this.getKV('notify_join') !== '0') await this.notifyJoin(u, n, now).catch((e) => console.log('notifyJoin', e && e.message));
     return { isNew: true, n };
@@ -202,26 +482,52 @@ export class Hub extends DurableObject {
     return true;
   }
 
-  /** الغرفة العامة تبلّغ حالتها. n = 0 أو phase = gone: تنشال من القائمة */
-  mmReport(code, { n = 0, phase = 'lobby', startsAt = 0 } = {}) {
+  /** الغرفة العامة تبلّغ حالتها (وأسماء اللي بيها للقائمة). n = 0 أو phase = gone: تنشال من القائمة */
+  mmReport(code, { n = 0, phase = 'lobby', startsAt = 0, host = '', players = [] } = {}) {
     const now = Date.now();
     if (!n || phase === 'gone') {
       this.sql.exec('DELETE FROM mm WHERE code = ?', String(code));
       return true;
     }
+    const list = JSON.stringify(
+      (Array.isArray(players) ? players : []).slice(0, MAX_PLAYERS).map((p) => ({ n: String((p && p.n) || '').slice(0, 18), s: Number(p && p.s) || 0 })),
+    );
     // كل لاعب دخل فعلًا يفك حجز واحد
     this.sql.exec(
-      `INSERT INTO mm (code, n, phase, ready, held, heldAt, startsAt, created, at) VALUES (?, ?, ?, 1, 0, 0, ?, ?, ?)
+      `INSERT INTO mm (code, n, phase, ready, held, heldAt, startsAt, created, at, host, players) VALUES (?, ?, ?, 1, 0, 0, ?, ?, ?, ?, ?)
        ON CONFLICT(code) DO UPDATE SET held = MAX(0, mm.held - MAX(0, excluded.n - mm.n)), n = excluded.n, phase = excluded.phase,
-         ready = 1, startsAt = excluded.startsAt, at = excluded.at`,
+         ready = 1, startsAt = excluded.startsAt, at = excluded.at, host = excluded.host, players = excluded.players`,
       String(code),
       Number(n) || 0,
       String(phase),
       Number(startsAt) || 0,
       now,
       now,
+      String(host || '').slice(0, 18),
+      list,
     );
     return true;
+  }
+
+  /** قائمة الغرف العامة للي يدورون: اللي تنتظر أول (الأملى فوق)، وبعدها اللي بنص لعبة */
+  mmList() {
+    const now = Date.now();
+    this.sql.exec('DELETE FROM mm WHERE at < ?', now - 30 * 60 * 1000);
+    return this.sql
+      .exec(
+        `SELECT code, n, phase, startsAt, host, players FROM mm WHERE n > 0
+         ORDER BY CASE WHEN phase = 'lobby' THEN 0 ELSE 1 END, n DESC, created ASC LIMIT 40`,
+      )
+      .toArray()
+      .map((r) => {
+        let players = [];
+        try {
+          players = JSON.parse(r.players || '[]');
+        } catch {
+          /* */
+        }
+        return { code: r.code, n: r.n, phase: r.phase, startsAt: r.startsAt || 0, host: r.host || '', players };
+      });
   }
 
   /** كم واحد ينتظر بالغرف العامة هسه */
@@ -230,9 +536,30 @@ export class Hub extends DurableObject {
     return { rooms: r.rooms, waiting: r.waiting };
   }
 
-  /** للبوت: اسم البوت ولغة اللاعب باللعبة (إذا فتحها قبل) */
-  botInfo(uid) {
-    return { bot: this.getKV('bot'), lang: uid ? this.eco.langOf(uid) : '' };
+  /** للبوت: اسم البوت، لغة اللاعب باللعبة، الحظر والصيانة، وخطوات المحادثة (اقتراح صوت / خطوات الأدمن) */
+  botInfo(uid, isAdmin = false) {
+    const st = (k) => {
+      const v = JSON.parse(this.getKV(k) || 'null');
+      // الخطوة تنتهي بعد ربع ساعة
+      if (v && Date.now() - (v.at || 0) > 15 * 60 * 1000) {
+        this.delKV(k);
+        return null;
+      }
+      return v;
+    };
+    return {
+      bot: this.getKV('bot'),
+      lang: uid ? this.eco.langOf(uid) : '',
+      banned: uid ? this.isBanned(uid) : false,
+      maint: this.getKV('maint') === '1',
+      sub: uid ? st('sub:' + uid) : null,
+      adm: isAdmin && uid ? st('adm:' + uid) : null,
+    };
+  }
+
+  delKV(k) {
+    this.sql.exec('DELETE FROM kv WHERE k = ?', k);
+    return true;
   }
 
   /* ---------------- الاقتصاد (RPC للعامل والغرف) */
@@ -395,7 +722,7 @@ export class Hub extends DurableObject {
   pickSounds(n) {
     const mode = String(this.env.SOUND_MODE || 'mix');
     const custom = this.sql
-      .exec('SELECT id, title, file_id, kind, img_file_id, dur FROM sounds WHERE active = 1')
+      .exec('SELECT id, title, file_id, kind, img_file_id, dur, by_name FROM sounds WHERE active = 1')
       .toArray()
       .map((c) => ({
         id: 'c:' + c.id,
@@ -403,9 +730,11 @@ export class Hub extends DurableObject {
         url: '/tgfile/' + c.file_id,
         img: c.img_file_id ? '/tgfile/' + c.img_file_id : '',
         video: c.kind === 'video',
-        emoji: '🎭',
+        emoji: c.by_name ? '🎙️' : '🎭',
         color: '#ff4f8b',
         dur: c.dur || 0,
+        // صوت ضافه لاعب: اسمه يطلع ويا الصوت
+        by: c.by_name || '',
         w: 3,
       }));
     let pool = custom;
@@ -471,7 +800,7 @@ export class Hub extends DurableObject {
     const job = JSON.parse(this.getKV('lib_job') || 'null');
     if (job && Date.now() - job.beat < 120000) return { ok: true, pending, running: true };
     this.setKV('lib_job', JSON.stringify({ started: Date.now(), beat: Date.now(), notify, ok: 0 }));
-    await this.ctx.storage.setAlarm(Date.now() + 100);
+    await this.kick(100);
     return { ok: true, pending, started: true };
   }
 
@@ -481,9 +810,24 @@ export class Hub extends DurableObject {
     return this.ensureLibrary({ notify: true });
   }
 
+  /** المنبّه الواحد يشغّل الشغلتين بالخلفية: تنزيل المكتبة والإذاعة، وكل وحدة تكول متى ترجع */
   async alarm() {
+    const waits = [];
+    for (const step of [() => this.libTick(), () => this.bcTick()]) {
+      try {
+        const ms = await step();
+        if (ms > 0) waits.push(ms);
+      } catch (e) {
+        console.log('alarm step failed', e && e.message);
+      }
+    }
+    if (waits.length) await this.ctx.storage.setAlarm(Date.now() + Math.min(...waits));
+  }
+
+  /** دفعة من تنزيل المكتبة. يرجع بعد كم ملي ثانية الجاية (0 = ماكو شي) */
+  async libTick() {
     const job = JSON.parse(this.getKV('lib_job') || 'null');
-    if (!job) return;
+    if (!job) return 0;
     const batch = this.libPending().slice(0, Math.max(1, Number(this.env.LIB_BATCH) || 4));
     for (const m of batch) {
       try {
@@ -512,11 +856,11 @@ export class Hub extends DurableObject {
     job.beat = Date.now();
     if (this.libPending().length) {
       this.setKV('lib_job', JSON.stringify(job));
-      await this.ctx.storage.setAlarm(Date.now() + Math.max(100, Number(this.env.LIB_GAP_MS) || 1200));
-      return;
+      return Math.max(100, Number(this.env.LIB_GAP_MS) || 1200);
     }
     this.sql.exec('DELETE FROM kv WHERE k = ?', 'lib_job');
     if (job.notify) await this.notifyLibraryDone(job.ok);
+    return 0;
   }
 
   async notifyLibraryDone(added) {
@@ -567,7 +911,7 @@ export class Hub extends DurableObject {
     const token = (this.env.TELEGRAM_BOT_TOKEN || '').trim();
     if (!token) return { ok: false, reason: 'TELEGRAM_BOT_TOKEN غير مضبوط' };
     const digest = toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))).slice(0, 12);
-    const stamp = `${origin}|${digest}|v7`;
+    const stamp = `${origin}|${digest}|v8`;
     if (!force && this.getKV('webhook') === stamp) return { ok: true, cached: true, bot: this.getKV('bot') };
     const tg = new Tg(token, this.env.TG_API_BASE);
     try {
@@ -578,22 +922,23 @@ export class Hub extends DurableObject {
         secret_token: await webhookSecret(token),
         allowed_updates: ['message', 'callback_query', 'pre_checkout_query'],
       });
-      await tg.call('setMyCommands', {
-        commands: [
-          { command: 'start', description: 'ابدأ' },
-          { command: 'play', description: 'سوّي غرفة لعب' },
-          { command: 'pass', description: 'الرويال باس المميز ⭐' },
-          { command: 'top', description: 'المتصدرين' },
-          { command: 'sounds', description: 'كم صوت شغّال باللعبة' },
-          { command: 'help', description: 'المساعدة' },
-        ],
-      });
+      const ar = [
+        { command: 'start', description: 'ابدأ' },
+        { command: 'play', description: 'سوّي غرفة لعب' },
+        { command: 'pass', description: 'الرويال باس المميز ⭐' },
+        { command: 'top', description: 'المتصدرين' },
+        { command: 'addsound', description: 'ضيف صوتك للعبة 🎙️' },
+        { command: 'sounds', description: 'كم صوت شغّال باللعبة' },
+        { command: 'help', description: 'المساعدة' },
+      ];
+      await tg.call('setMyCommands', { commands: ar });
       // نفس الأوامر بلغة تطبيق اللاعب (تيليجرام يختار حسب لغته)
       const ru = [
         { command: 'start', description: 'Начать' },
         { command: 'play', description: 'Создать комнату' },
         { command: 'pass', description: 'Премиум-пропуск ⭐' },
         { command: 'top', description: 'Лидеры' },
+        { command: 'addsound', description: 'Добавить свой звук 🎙️' },
         { command: 'sounds', description: 'Сколько звуков в игре' },
         { command: 'help', description: 'Помощь' },
       ];
@@ -602,6 +947,7 @@ export class Hub extends DurableObject {
         { command: 'play', description: 'Create a game room' },
         { command: 'pass', description: 'Premium Royal Pass ⭐' },
         { command: 'top', description: 'Leaderboard' },
+        { command: 'addsound', description: 'Add your own sound 🎙️' },
         { command: 'sounds', description: 'Active sounds in the game' },
         { command: 'help', description: 'Help' },
       ];
@@ -611,6 +957,15 @@ export class Hub extends DurableObject {
         ['en', en],
       ]) {
         await tg.call('setMyCommands', { commands, language_code }).catch(() => null);
+      }
+      // الأدمن بس يشوف أمر لوحة المطوّر
+      for (const a of adminIds(this.env).slice(0, 5)) {
+        await tg
+          .call('setMyCommands', {
+            commands: [{ command: 'admin', description: 'لوحة المطوّر 🛠️' }, ...ar],
+            scope: { type: 'chat', chat_id: Number(a) },
+          })
+          .catch(() => null);
       }
       await tg
         .call('setChatMenuButton', { menu_button: { type: 'web_app', text: '🎮 العب', web_app: { url: origin + '/' } } })

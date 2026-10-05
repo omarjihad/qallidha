@@ -16,6 +16,8 @@ export const DEFAULTS = {
   haptics: true,
   mic: 'auto', // auto | keep | release
   reactions: true,
+  voice: true, // الدردشة الصوتية بالغرفة (تسمع وتحچي)
+  voiceMic: true, // مايك الدردشة (زر بالغرفة)
 };
 
 const CHOICES = {

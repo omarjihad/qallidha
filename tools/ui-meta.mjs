@@ -274,7 +274,7 @@ let p = await profile(page);
 check(p && p.mics === 0 && p.level.level === 1, `حساب جديد: ${p && p.mics} مايك، لفل ${p && p.level.level}`);
 const chip = await page.$eval('.profile-chip', (e) => e.innerText);
 check(/⭐ 1/.test(chip) && /🎤 0/.test(chip), 'شارة الحساب: لفل ومايكات');
-check((await page.$$('.menu-side .side-btn')).length === 3, 'أزرار المتجر/الباس/مجاني بالقائمة');
+check((await page.$$('.menu-side .side-btn')).length === 4, 'أزرار المتجر/الباس/مجاني/ضيف صوت بالقائمة');
 check(!!(await page.$('.menu-side .side-btn.dot')), 'نقطة على «مجاني» (الصندوق متاح)');
 await clearOfHeader(page, '.menu-side .side-btn, .menu-btns button, .menu-top button, .profile-chip', 'أزرار القائمة');
 await shot(page, 'menu');

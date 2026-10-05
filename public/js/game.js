@@ -12,6 +12,7 @@ import * as ui from './ui.js';
 import { $, el } from './ui.js';
 import { haptic, closingConfirmation, backButton, shareText } from './tg.js';
 import { t } from './i18n.js';
+import { VoiceChat } from './voice.js';
 
 // مهلة قبل بداية موجة المثال داخل نافذة التسجيل (ثواني) — الناس تبدي متأخرة شوية بعد «يلا!»
 const LEAD = 0.25;
@@ -28,7 +29,11 @@ const ROOM_ERRORS = {
   notfound: 'ماكو غرفة بهالكود 🤷 تأكد من الرقم',
   kicked: 'المضيف طلّعك من الغرفة',
   nosounds: 'ماكو ولا صوت شغّال 😕 الأدمن يفعّل أصوات من البوت بأمر /sounds',
+  banned: '🚫 حسابك محظور من اللعبة',
+  maint: '🛠️ اللعبة بالصيانة هسه — نرجع قريب',
 };
+// أخطاء تطلّع من الغرفة
+const FATAL = ['started', 'full', 'kicked', 'notfound', 'banned', 'maint'];
 
 export class Game {
   constructor({ stage, audio, config, meta, onExit, pub = false, onRetry = null, onQuick = null }) {
@@ -65,6 +70,13 @@ export class Game {
     this.frameFn = (dt) => this.onFrame(dt);
     stage.onFrame(this.frameFn);
     this.active = false;
+    // الدردشة الصوتية بالغرفة
+    this.voice = new VoiceChat(audio, {
+      getConn: () => this.conn,
+      seatUid: (seat) => (this.st && this.st.players[seat] ? this.st.players[seat].uid : null),
+      onChange: () => this.renderChatBtn(),
+    });
+    this.chatTalk = new Set();
   }
 
   /* ================================================== دخول وخروج */
@@ -82,6 +94,7 @@ export class Game {
       },
       state: (m) => this.apply(m.st),
       take: (x) => this.onTake(x),
+      voice: (x) => this.voice.receive(x.seat, x.data),
       react: (m) => this.showReaction(m.uid, m.e),
       error: (m) => {
         // لعب عشوائي: الغرفة امتلت أو بدت قبل ما نوصل — نروح لغيرها بدون ما نزعج اللاعب
@@ -94,10 +107,11 @@ export class Game {
           return;
         }
         ui.toast(t(ROOM_ERRORS[m.code] || m.m || 'صار خطأ'), 3500);
-        if (['started', 'full', 'kicked', 'notfound'].includes(m.code)) setTimeout(() => this.leave(true), 600);
+        if (FATAL.includes(m.code)) setTimeout(() => this.leave(true), 600);
       },
       status: (s) => this.onStatus(s),
     });
+    this.voice.start();
     backButton(() => this.askLeave());
     clearInterval(this.tickTimer);
     this.tickTimer = setInterval(() => this.tick(), 500);
@@ -111,6 +125,10 @@ export class Game {
 
   leave(silent = false) {
     this.active = false;
+    // الدردشة تتسكّر أول (حتى المايك يتسكّر بعدها إذا لازم)
+    this.voice.dispose();
+    this.chatTalk.clear();
+    this.renderChatBtn();
     this.clearTimers();
     clearInterval(this.tickTimer);
     this.tickTimer = null;
@@ -214,7 +232,11 @@ export class Game {
       this.micSent = true;
       this.conn.send({ t: 'mic', ok: true });
     }
-    this.stage.setPlayers(st.players.map((p) => ({ uid: p.uid, skin: p.skin, acc: p.acc || null })));
+    // اللاعبين يدخلون يمشون من اليسار ويوكفون بالصف (أول ما تدخل الغرفة، وكل ما يدخل واحد جديد)
+    this.stage.setPlayers(
+      st.players.map((p) => ({ uid: p.uid, skin: p.skin, acc: p.acc || null })),
+      { enter: true },
+    );
     this.stage.setTheme(st.stage || 'stage:classic');
     this.syncLabels();
     const key = `${st.gameNo}:${st.round}:${st.phase}`;
@@ -250,7 +272,78 @@ export class Game {
       }
       return { ...p, score, mult, bonus };
     });
-    ui.renderCards(players, { me: this.me, host: st.host, gains, badges });
+    ui.renderCards(players, { me: this.me, host: st.host, gains, badges, muted: this.voice.muted });
+  }
+
+  /* ================================================== الدردشة الصوتية */
+
+  /** زر المايك: 🎙️ شغّال، 🔇 طافي، 🔒 مسدود وقت التقليد */
+  renderChatBtn() {
+    const b = $('#chatBtn');
+    if (!b) return;
+    const s = this.active ? this.voice.state : 'hidden';
+    b.dataset.state = s;
+    b.classList.toggle('live', s === 'on' && this.voice.sending);
+    b.textContent = s === 'off' ? '🔇' : s === 'lock' ? '🔒' : '🎙️';
+    b.setAttribute(
+      'aria-label',
+      s === 'on' ? t('🎙️ مايكك شغّال — ربعك يسمعونك') : s === 'lock' ? t('🔒 المايك مسدود وقت التقليد') : t('🔇 مايكك مسكّر'),
+    );
+    // أول مرة: نعرّفه شلون يشتغل
+    if (s === 'on' && !this.voiceHinted) {
+      this.voiceHinted = true;
+      let seen = false;
+      try {
+        seen = localStorage.getItem('qd_voice_hint') === '1';
+        localStorage.setItem('qd_voice_hint', '1');
+      } catch {
+        /* */
+      }
+      if (!seen) ui.toast(t('🎙️ الدردشة الصوتية شغّالة: ربعك يسمعونك — زر 🎙️ يسكّر مايكك، ودوس على كارت لاعب حتى تكتمه'), 5000);
+    }
+  }
+
+  async toggleChat() {
+    haptic('light');
+    if (this.voice.locked) return ui.toast(t('🔒 المايك مسدود وقت التقليد — يرجع بعد التسجيل'), 2500);
+    const on = await this.voice.toggle();
+    if (on && this.audio.micState !== 'on') {
+      ui.toast(this.audio.micState === 'denied' ? t('المايك مرفوض — اسمح لتيليجرام يستخدم المايك من إعدادات الجهاز') : t('ما كدرنا نشغّل المايك'), 4000);
+      return;
+    }
+    if (on && this.conn && this.st && this.st.phase === 'lobby') this.conn.send({ t: 'mic', ok: true });
+    ui.toast(on ? t('🎙️ مايكك شغّال — ربعك يسمعونك') : t('🔇 سكّرت مايكك — بعدك تسمع ربعك'), 2200);
+    if (this.st && this.st.phase === 'lobby') this.renderLobbyBar();
+  }
+
+  /** دوس على كارت لاعب: تكتمه (عندك بس) أو ترجّعه */
+  toggleMutePlayer(uid) {
+    if (!this.st || uid === this.me || !this.voice.enabled) return;
+    const p = this.player(uid);
+    if (!p) return;
+    haptic('select');
+    const muted = this.voice.toggleMute(uid);
+    ui.toast(muted ? t('🔇 كتمت صوت {name}', { name: p.name }) : t('🔊 رجّعت صوت {name}', { name: p.name }), 1800);
+    this.renderCardsNow();
+  }
+
+  /** كل فريم: مين يحچي (الكارت يضوي وتمه يتحرك) */
+  voiceFrame() {
+    const cards = $('#cards').children;
+    for (const card of cards) {
+      const uid = card.dataset.uid;
+      const talking = this.voice.talking(uid, this.me);
+      card.classList.toggle('talking', talking);
+      if (this.talkers.has(uid)) continue;
+      const c = this.stage.char(uid);
+      if (talking) {
+        this.chatTalk.add(uid);
+        if (c) c.talkTarget = Math.max(0.25, this.voice.level(uid, this.me));
+      } else if (this.chatTalk.has(uid)) {
+        this.chatTalk.delete(uid);
+        if (c && !(this.st && this.st.phase === 'perform' && uid === this.me)) c.talkTarget = 0;
+      }
+    }
   }
 
   enterPhase(st) {
@@ -259,6 +352,7 @@ export class Game {
     this.setCount('');
     $('#goText').classList.remove('show');
     document.documentElement.dataset.phase = st.phase;
+    this.voice.setPhase(st.phase);
     this.targeting = false;
     this.setTargeting(false);
     this.setFocusLabel(null);
@@ -533,7 +627,9 @@ export class Game {
     this.wavebar.setRef(entry ? entry.peaks : null, dur, win, LEAD);
     this.wavebar.mode = 'listen';
     this.wavebar.show(true);
-    $('#caption').textContent = sound.title ? `${sound.emoji ? sound.emoji + ' ' : ''}${sound.title}` : '';
+    $('#caption').textContent = sound.title
+      ? `${sound.emoji ? sound.emoji + ' ' : ''}${sound.title}${sound.by ? ' · ' + t('من {name}', { name: sound.by }) : ''}`
+      : '';
     const media = now < tl.countAt ? ui.showMeme(sound, entry) : null;
     if (entry && now < tl.listenEnd) {
       if (!this.audio.running) this.tapToHear(entry, tl);
@@ -1104,6 +1200,7 @@ export class Game {
       l.hit.style.width = `${h * 0.6}px`;
       l.hit.style.height = `${h}px`;
     }
+    this.voiceFrame();
     for (const [uid, an] of this.talkers) {
       const c = this.stage.char(uid);
       const lv = AudioEngine.level(an);

@@ -9,6 +9,7 @@ const fileData = { 'voice/file_1.oga': process.env.OGG, 'photos/file_2.jpg': pro
 const LIB_MP3 = process.env.MP3 || new URL('../public/sounds/duck.mp3', import.meta.url).pathname;
 const LIB_BROKEN = new Set((process.env.LIB_BROKEN || 'bruh').split(',')); // أصوات «صفحتها مكسورة» لاختبار الفشل
 let mid = 100;
+let rateHit = false;
 http
   .createServer((req, res) => {
     let body = '';
@@ -48,9 +49,39 @@ http
       let payload = {};
       try { payload = JSON.parse(body || '{}'); } catch {}
       calls.push({ method, payload });
+      const fail = (code, description, extra = {}) => {
+        res.setHeader('content-type', 'application/json');
+        return res.end(JSON.stringify({ ok: false, error_code: code, description, ...extra }));
+      };
       let result = true;
       if (method === 'getMe') result = { id: 777, is_bot: true, first_name: 'قلّدها', username: 'qallidha_test_bot' };
       if (method === 'sendMessage') result = { message_id: ++mid, chat: { id: payload.chat_id }, text: payload.text };
+      // الإذاعة: آيديات تنتهي بـ13 حاظرة البوت، والآيدي 4290000 يطلع 429 مرة وحدة
+      if (method === 'copyMessage') {
+        const id = String(payload.chat_id);
+        if (id.endsWith('13')) return fail(403, 'Forbidden: bot was blocked by the user');
+        if (id === '4290000' && !rateHit) {
+          rateHit = true;
+          return fail(429, 'Too Many Requests: retry after 1', { parameters: { retry_after: 1 } });
+        }
+        result = { message_id: ++mid };
+      }
+      if (/^send(Voice|Audio|Video|VideoNote|Document|Photo)$/.test(method)) result = { message_id: ++mid, chat: { id: payload.chat_id } };
+      // صورة البروفايل: آيديات تنتهي بـ0 ما عندهم صورة
+      if (method === 'getUserProfilePhotos') {
+        result = String(payload.user_id).endsWith('0')
+          ? { total_count: 0, photos: [] }
+          : {
+              total_count: 1,
+              photos: [
+                [
+                  { file_id: 'FILEID_pp160_' + payload.user_id, width: 160, height: 160 },
+                  { file_id: 'FILEID_pp320_' + payload.user_id, width: 320, height: 320 },
+                  { file_id: 'FILEID_pp640_' + payload.user_id, width: 640, height: 640 },
+                ],
+              ],
+            };
+      }
       if (method === 'createInvoiceLink') result = 'https://t.me/$invoice_' + Buffer.from(String(payload.payload)).toString('hex');
       if (method === 'sendInvoice') result = { message_id: ++mid, chat: { id: payload.chat_id }, invoice: { title: payload.title } };
       if (method === 'getFile') {

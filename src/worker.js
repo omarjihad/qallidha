@@ -3,8 +3,8 @@
 import { Room } from './room.js';
 import { Hub } from './hub.js';
 import { identify, AuthError, webhookSecret } from './auth.js';
-import { handleUpdate, Tg } from './telegram.js';
-import { VERSION } from '../public/js/shared.js';
+import { handleUpdate, Tg, adminIds } from './telegram.js';
+import { VERSION, MAX_PLAYERS } from '../public/js/shared.js';
 import { LIBRARY_BY_SLUG } from './library-sounds.js';
 import { seasonOf } from '../public/js/catalog.js';
 import { passPrice, passInvoice, packInvoice } from './pass.js';
@@ -29,6 +29,41 @@ function stub(ns, name, env) {
 }
 const hubOf = (env) => stub(env.HUB, 'hub', env);
 const roomOf = (env, code) => stub(env.ROOMS, 'r' + code, env);
+
+/* ---------------- الصيانة والحظر (من لوحة المطوّر): نخزنها بالذاكرة 20 ثانية حتى ما نسأل الـHub بكل طلب */
+let flagsCache = { at: 0, maint: false, banned: new Set() };
+async function flags(env) {
+  if (Date.now() - flagsCache.at < 20000) return flagsCache;
+  try {
+    const f = await hubOf(env).flags();
+    flagsCache = { at: Date.now(), maint: !!f.maint, banned: new Set(f.banned || []) };
+  } catch {
+    flagsCache.at = Date.now() - 15000;
+  }
+  return flagsCache;
+}
+const isAdminUser = (env, user) => !!user && !user.guest && adminIds(env).includes(String(user.tgId));
+const BANNED = { error: 'banned', message: '🚫 حسابك محظور من اللعبة' };
+const MAINT = { error: 'maint', message: '🛠️ اللعبة بالصيانة هسه — نرجع قريب' };
+
+/** يرفض الدخول (محظور/صيانة) قبل ما يوصل للغرفة. يرجع Response أو null */
+async function gate(env, user) {
+  const f = await flags(env);
+  if (user && f.banned.has(user.uid)) return json(BANNED, 403);
+  if (f.maint && !isAdminUser(env, user)) return json(MAINT, 503);
+  return null;
+}
+
+/** WebSocket مرفوض بس برسالة واضحة (حتى اللعبة ما تعيد الاتصال كل شوية) */
+function wsReject(code, m) {
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+  server.accept();
+  server.send(JSON.stringify({ t: 'error', code, m }));
+  server.close(4001, code);
+  return new Response(null, { status: 101, webSocket: client });
+}
 
 function publicOrigin(env, url) {
   const fromEnv = String(env.PUBLIC_URL || '').trim().replace(/\/$/, '');
@@ -192,8 +227,10 @@ async function api(request, env, ctx, url) {
 
   if (path === '/api/config') {
     const bot = token ? await hubOf(env).getKV('bot') : null;
+    const f = await flags(env);
     return json({
       version: VERSION,
+      maintenance: f.maint,
       bot: bot || String(env.BOT_USERNAME || '').replace('@', '') || null,
       appShort: String(env.APP_SHORT_NAME || '').trim() || null,
       guests: String(env.ALLOW_GUEST || 'true') !== 'false',
@@ -221,13 +258,14 @@ async function api(request, env, ctx, url) {
   if (path === '/api/me' && request.method === 'POST') {
     const body = await readAuth(request);
     const user = await identify(env, body);
+    if (!user.guest && (await flags(env)).banned.has(user.uid)) return json(BANNED, 403);
     const hub = hubOf(env);
     const lang = ['ar', 'ru', 'en'].includes(body.lang) ? body.lang : '';
     const stats = user.guest ? { games: 0, wins: 0, points: 0, best: 0, rank: null } : await hub.me(user.uid);
     const profile = user.guest ? null : await hub.profile(user.uid, user.name, user.photo, lang);
     // أول مرة يفتح اللعبة (وما دخل البوت قبل): إشعار للأدمن
     if (!user.guest && user.tg) ctx.waitUntil(hub.join({ ...user.tg, src: appSource(user) }).catch(() => null));
-    return json({ user: { uid: user.uid, name: user.name, photo: user.photo, guest: user.guest, startParam: user.startParam }, stats, profile });
+    return json({ user: { uid: user.uid, name: user.name, photo: user.photo, guest: user.guest, startParam: user.startParam, admin: isAdminUser(env, user) }, stats, profile });
   }
 
   // ---------------- المتجر والإعلانات والباس (لاعبين تيليجرام بس)
@@ -236,6 +274,7 @@ async function api(request, env, ctx, url) {
     const body = await readAuth(request);
     const user = await identify(env, body);
     if (user.guest) return json({ error: 'tg_only', message: 'افتح اللعبة من تيليجرام حتى تجمع مايكات وتشتري' }, 403);
+    if ((await flags(env)).banned.has(user.uid)) return json(BANNED, 403);
     const hub = hubOf(env);
     const withProfile = async (r) => json({ ...r, profile: await hub.profile(user.uid) }, r.error ? 400 : 200);
     if (path === '/api/shop/buy') return withProfile(await hub.buy(user.uid, String(body.item || '')));
@@ -281,16 +320,29 @@ async function api(request, env, ctx, url) {
     }
   }
 
+  // قائمة الغرف العامة (اللعب العشوائي): يختار منها أو يسوّي وحدة
+  if (path === '/api/rooms/public' && request.method === 'GET') {
+    return json({ rooms: await hubOf(env).mmList(), max: MAX_PLAYERS });
+  }
+
+  // غرفة جديدة: ويا الربع = خاصة (بالكود بس)، أو عامة (تبين بالقائمة)
   if (path === '/api/rooms' && request.method === 'POST') {
     const body = await readAuth(request);
-    await identify(env, body);
-    return json({ code: await claimRoom(env) });
+    const user = await identify(env, body);
+    const no = await gate(env, user);
+    if (no) return no;
+    const pub = body.pub === true;
+    const code = await claimRoom(env, null, pub);
+    if (pub) await hubOf(env).mmAdd(code);
+    return json({ code, pub });
   }
 
   // اللعب العشوائي: أقرب غرفة عامة بيها مكان، وإذا ماكو نسوّي وحدة جديدة وننتظر بيها ناس
   if (path === '/api/quick' && request.method === 'POST') {
     const body = await readAuth(request);
-    await identify(env, body);
+    const user = await identify(env, body);
+    const no = await gate(env, user);
+    if (no) return no;
     const hub = hubOf(env);
     const okCode = (c) => /^\d{5}$/.test(String(c || ''));
     const exclude = Array.isArray(body.exclude) ? body.exclude.filter(okCode).map(String).slice(0, 12) : [];
@@ -323,6 +375,9 @@ async function websocket(request, env, url) {
   } catch (e) {
     return new Response(e instanceof AuthError ? e.message : 'auth failed', { status: 401 });
   }
+  const f = await flags(env);
+  if (f.banned.has(user.uid)) return wsReject('banned', BANNED.message);
+  if (f.maint && !isAdminUser(env, user)) return wsReject('maint', MAINT.message);
   const headers = new Headers(request.headers);
   // ترميز ASCII حتى الأسماء العربية ما تخرّب الهيدر
   headers.set('X-User', encodeURIComponent(JSON.stringify({ uid: user.uid, name: user.name, photo: user.photo, guest: user.guest })));

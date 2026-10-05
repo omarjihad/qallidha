@@ -77,6 +77,49 @@ function shade(hex, f) {
   return '#' + c.getHexString();
 }
 
+/* أشكال الإكسسوارات: نجمة، مستطيل مدوّر، وإطار (شكل بنصه فتحة) */
+function starShape(outer, inner, n = 5) {
+  const sh = new THREE.Shape();
+  for (let i = 0; i <= n * 2; i++) {
+    const a = Math.PI / 2 + (i * Math.PI) / n;
+    const r = i % 2 ? inner : outer;
+    const x = Math.cos(a) * r;
+    const y = Math.sin(a) * r;
+    if (i === 0) sh.moveTo(x, y);
+    else sh.lineTo(x, y);
+  }
+  return sh;
+}
+function roundRect(w, h, r, path = new THREE.Shape()) {
+  const x = -w / 2;
+  const y = -h / 2;
+  path.moveTo(x + r, y);
+  path.lineTo(x + w - r, y);
+  path.quadraticCurveTo(x + w, y, x + w, y + r);
+  path.lineTo(x + w, y + h - r);
+  path.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  path.lineTo(x + r, y + h);
+  path.quadraticCurveTo(x, y + h, x, y + h - r);
+  path.lineTo(x, y + r);
+  path.quadraticCurveTo(x, y, x + r, y);
+  return path;
+}
+/** إطار: الشكل الخارجي وبنصه فتحة بشكل الداخلي */
+function frameShape(outer, inner) {
+  const pts = inner.getPoints(24).reverse();
+  outer.holes.push(new THREE.Path(pts));
+  return outer;
+}
+const extrude = (shape, depth, bevel = 0.006) => {
+  const g = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: bevel > 0, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 2, curveSegments: 18 });
+  g.translate(0, 0, -depth / 2);
+  return g;
+};
+const glassMat = (color = '#d9f2ff', opacity = 0.28) =>
+  new THREE.MeshStandardMaterial({ color: new THREE.Color(color), transparent: true, opacity, roughness: 0.05, metalness: 0.15, depthWrite: false });
+/** سطح الراس (حتى الشوارب والرقعة يلزقون على الوجه) */
+const faceZ = (x, y, out = 0.02) => 0.41 * Math.sqrt(Math.max(0, 1 - (x / 0.43) ** 2 - (y / 0.42) ** 2)) + out;
+
 /* ============================================================ شخصية */
 
 function accKey(acc) {
@@ -224,7 +267,9 @@ class Character {
       }
       this.part(head, new THREE.BoxGeometry(0.08, 0.016, 0.016), '#141414', [0, 0.045, 0.41], [1, 1, 1], 0);
     }
-    this.hair(head, S);
+    // لابس شي على راسه؟ الطاقية/الكاب اللي جزء من الشخصية تصير شعر عادي (حتى ما تطلع من تحت القبعة)
+    const hatOn = acc && acc.head;
+    this.hair(head, hatOn && ['cap', 'beanie', 'mohawk', 'helmet'].includes(S.style) ? { ...S, style: 'short' } : S);
     // الملك: تاجه جزء منه (إلا إذا لابس شي ثاني على راسه)
     this.accessories(head, S.crown && !(acc && acc.head) ? { ...(acc || {}), head: 'head:crown' } : acc);
   }
@@ -246,19 +291,49 @@ class Character {
     const cone = (r, h, seg = 20) => new THREE.CylinderGeometry(0, r, h, seg);
     const cyl = (r1, r2, h, seg = 28, open = false) => new THREE.CylinderGeometry(r1, r2, h, seg, 1, open);
     switch (acc.head) {
-      case 'head:party':
-        add(cone(0.2, 0.5), '#ff4fa3', [0.05, 0.66, 0], [0, 0, -0.18]);
-        add(G.sphereLo, '#ffd60a', [0.14, 0.92, 0], [0, 0, 0], [0.07, 0.07, 0.07]);
-        add(new THREE.TorusGeometry(0.17, 0.025, 8, 20), '#3a86ff', [0.02, 0.48, 0], [Math.PI / 2, 0.18, 0]);
+      case 'head:party': {
+        // مخروط مخطط مايل + كرة منفوشة فوك
+        const g = new THREE.Group();
+        g.position.set(0.04, 0.4, 0);
+        g.rotation.z = -0.2;
+        head.add(g);
+        const cols = ['#ff4fa3', '#ffd60a', '#ff4fa3', '#3a86ff', '#ff4fa3'];
+        const H = 0.56;
+        for (let i = 0; i < 5; i++) {
+          const y0 = (i / 5) * H;
+          const y1 = ((i + 1) / 5) * H;
+          const r0 = 0.21 * (1 - y0 / H);
+          const r1 = 0.21 * (1 - y1 / H);
+          add(cyl(r1, r0, y1 - y0, 22), cols[i], [0, (y0 + y1) / 2, 0], [0, 0, 0], [1, 1, 1], 0.55, g);
+        }
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * Math.PI * 2;
+          add(G.sphereLo, i % 2 ? '#ffffff' : '#fff3a0', [Math.cos(a) * 0.035, H + 0.03 + Math.sin(a * 2) * 0.012, Math.sin(a) * 0.035], [0, 0, 0], [0.05, 0.05, 0.05], 0.9, g);
+        }
+        add(G.sphereLo, '#ffffff', [0, H + 0.06, 0], [0, 0, 0], [0.045, 0.045, 0.045], 0.9, g);
+        add(new THREE.TorusGeometry(0.205, 0.018, 8, 26), '#3a86ff', [0, 0.02, 0], [Math.PI / 2, 0, 0], [1, 1, 1], 0.5, g);
         break;
+      }
       case 'head:cap':
         add(new THREE.SphereGeometry(0.47, 26, 14, 0, Math.PI * 2, 0, Math.PI * 0.5), '#e63946', [0, 0.06, 0], [-0.08, 0, 0]);
         add(cyl(0.3, 0.3, 0.03), '#c1121f', [0, 0.14, -0.34], [-0.25, 0, 0], [1, 1, 0.85]);
         break;
-      case 'head:chef':
-        add(cyl(0.3, 0.32, 0.32), '#ffffff', [0, 0.52, -0.02], [-0.1, 0, 0], [1, 1, 1], 0.8);
-        add(G.sphere, '#ffffff', [0, 0.76, -0.04], [0, 0, 0], [0.4, 0.22, 0.38], 0.8);
+      case 'head:chef': {
+        // طاقية طباخ منفوشة: حزام وفوكه غيمة
+        add(cyl(0.36, 0.38, 0.2, 30), '#fafafa', [0, 0.4, -0.02], [-0.08, 0, 0], [1, 1, 1], 0.85);
+        add(cyl(0.385, 0.385, 0.035, 30, true), '#e8e8e8', [0, 0.32, -0.02], [-0.08, 0, 0], [1, 1, 1], 0.85);
+        const puff = [
+          [0, 0.66, -0.06, 0.27],
+          [0.2, 0.6, -0.04, 0.2],
+          [-0.2, 0.6, -0.04, 0.2],
+          [0, 0.6, 0.16, 0.2],
+          [0, 0.6, -0.25, 0.19],
+          [0.14, 0.71, 0.08, 0.17],
+          [-0.14, 0.71, 0.08, 0.17],
+        ];
+        for (const [x, y, z, r] of puff) add(G.sphere, '#ffffff', [x, y, z], [0, 0, 0], [r, r * 0.85, r], 0.9);
         break;
+      }
       case 'head:headphones':
         add(new THREE.TorusGeometry(0.47, 0.04, 10, 28, Math.PI), '#26262b', [0, 0.02, 0], [0, 0, 0]);
         for (const sx of [-1, 1]) {
@@ -272,11 +347,21 @@ class Character {
           add(G.capsule(0.045, 0.3), '#ffb3cd', [0.17 * sx, 0.68, 0.025], [0.1, 0, -0.15 * sx], [1, 1, 0.4], 0.8);
         }
         break;
-      case 'head:cowboy':
-        add(cyl(0.66, 0.66, 0.035, 32), '#8b5a2b', [0, 0.3, 0], [-0.08, 0, 0]);
-        add(cyl(0.29, 0.33, 0.32, 24), '#8b5a2b', [0, 0.47, -0.01], [-0.08, 0, 0]);
-        add(cyl(0.335, 0.335, 0.06, 24), '#3b2412', [0, 0.36, -0.01], [-0.08, 0, 0]);
+      case 'head:cowboy': {
+        // حافة ملفوفة من الجنبين + تاج مطعوج + حزام بإبزيم
+        const g = new THREE.Group();
+        g.position.set(0, 0.3, 0);
+        g.rotation.x = -0.08;
+        head.add(g);
+        add(cyl(0.64, 0.64, 0.035, 36), '#9a6332', [0, 0, 0], [0, 0, 0], [1, 1, 0.92], 0.75, g);
+        for (const sx of [-1, 1]) add(new THREE.TorusGeometry(0.12, 0.03, 8, 16, Math.PI), '#9a6332', [0.58 * sx, 0.1, 0], [Math.PI / 2, 0, sx > 0 ? -Math.PI / 2 : Math.PI / 2], [1, 1, 1], 0.75, g);
+        add(cyl(0.3, 0.34, 0.34, 26), '#9a6332', [0, 0.18, -0.01], [0, 0, 0], [1, 1, 0.9], 0.75, g);
+        add(G.sphere, '#9a6332', [0, 0.35, -0.01], [0, 0, 0], [0.3, 0.07, 0.27], 0.75, g);
+        add(G.sphere, '#7a4b22', [0, 0.37, 0.02], [0, 0, 0], [0.06, 0.05, 0.2], 0.75, g);
+        add(cyl(0.345, 0.345, 0.07, 26, true), '#3b2412', [0, 0.06, -0.01], [0, 0, 0], [1, 1, 0.9], 0.6, g);
+        add(new THREE.BoxGeometry(0.1, 0.075, 0.02), '#e8c35a', [0, 0.06, 0.31], [0, 0, 0], [1, 1, 1], 0.25, g);
         break;
+      }
       case 'head:straw':
         add(cyl(0.66, 0.66, 0.03, 32), '#f4d06f', [0, 0.3, 0], [-0.06, 0, 0], [1, 1, 1], 0.9);
         add(new THREE.SphereGeometry(0.36, 22, 12, 0, Math.PI * 2, 0, Math.PI * 0.5), '#f4d06f', [0, 0.3, 0], [-0.06, 0, 0], [1, 0.75, 1], 0.9);
@@ -288,7 +373,18 @@ class Character {
         add(cyl(0.305, 0.305, 0.08, 26, true), '#d62f3a', [0, 0.45, -0.01], [-0.08, 0, 0]);
         break;
       case 'head:horns':
-        for (const sx of [-1, 1]) add(cone(0.08, 0.32, 14), '#d62828', [0.22 * sx, 0.46, 0.05], [0.2, 0, -0.45 * sx], [1, 1, 1], 0.35);
+        // قرون شيطان معكوفة: قطع تصغر وتلتوي للبرّا وللفوك
+        for (const sx of [-1, 1]) {
+          const n = 7;
+          for (let i = 0; i < n; i++) {
+            const k = i / (n - 1);
+            const a = 0.35 + k * 0.9;
+            const x = sx * (0.21 + 0.13 * Math.sin(k * 1.4));
+            const y = 0.36 + k * 0.3 - k * k * 0.06;
+            const r = 0.085 * (1 - k * 0.82);
+            add(G.sphere, k > 0.6 ? '#9b0f14' : '#d62828', [x, y, 0.08 - k * 0.04], [0, 0, -sx * a], [r, r * 1.6, r], 0.3);
+          }
+        }
         break;
       case 'head:crown':
       case 'head:goldcrown': {
@@ -320,11 +416,24 @@ class Character {
         add(cyl(0.47, 0.47, 0.07, 26, true), '#6c584c', [0, 0.06, 0], [-0.05, 0, 0]);
         for (const sx of [-1, 1]) add(cone(0.08, 0.38, 14), '#f1e3c8', [0.44 * sx, 0.3, 0], [0, 0, -1.0 * sx], [1, 1, 1], 0.6);
         break;
-      case 'head:wizard':
-        add(cyl(0.58, 0.58, 0.03, 30), '#5a189a', [0, 0.33, 0], [-0.05, 0, 0]);
-        add(cone(0.36, 0.85, 24), '#5a189a', [0.06, 0.74, -0.04], [-0.1, 0, -0.16]);
-        glow(G.sphereLo, '#ffe066', [0.05, 0.62, 0.3], [0, 0, 0], [0.05, 0.05, 0.02]);
+      case 'head:wizard': {
+        add(cyl(0.6, 0.6, 0.03, 32), '#5a189a', [0, 0.33, 0], [-0.05, 0, 0]);
+        add(cyl(0.355, 0.36, 0.08, 26, true), '#ffd60a', [0.01, 0.38, -0.01], [-0.06, 0, -0.03]);
+        // مخروط معكوف من راسه
+        const segs = 6;
+        for (let i = 0; i < segs; i++) {
+          const k0 = i / segs;
+          const k1 = (i + 1) / segs;
+          const h = 0.9 / segs;
+          const bend = k0 * k0 * 0.35;
+          add(cyl(0.34 * (1 - k1) + 0.01, 0.34 * (1 - k0) + 0.01, h + 0.01, 22), '#5a189a', [0.04 + bend * 0.6, 0.42 + (k0 + k1) * 0.45, -0.04 - bend * 0.2], [-0.08, 0, -0.12 - bend * 1.4]);
+        }
+        const star = extrude(starShape(0.07, 0.03), 0.012, 0.004);
+        glow(star, '#ffe066', [0.06, 0.58, 0.31], [-0.25, 0, 0.2]);
+        glow(extrude(starShape(0.045, 0.02), 0.01, 0.003), '#fff3a0', [-0.14, 0.75, 0.22], [-0.3, 0.4, -0.3]);
+        glow(G.sphereLo, '#fff3a0', [0.16, 0.86, 0.12], [0, 0, 0], [0.025, 0.025, 0.025]);
         break;
+      }
       case 'head:propeller': {
         add(new THREE.SphereGeometry(0.46, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.5), '#ffd60a', [0, 0.06, 0], [-0.06, 0, 0]);
         add(new THREE.SphereGeometry(0.465, 24, 12, 0, Math.PI, 0, Math.PI * 0.5), '#3a86ff', [0, 0.06, 0], [-0.06, 0, 0]);
@@ -339,38 +448,144 @@ class Character {
       }
       default:
     }
+    // نظارات: عدستين + إطار + جسر + ذراعين للآذان
+    const glasses = ({ lens, frameW, frameH, radius, frame, frameColor, lensMat, bridgeY = 0.06, arm = '#151515', shape = null, tape = false }) => {
+      const g = new THREE.Group();
+      g.position.set(0, 0.035, 0.418);
+      head.add(g);
+      for (const sx of [-1, 1]) {
+        const outer = shape ? shape(frameW, frameH) : roundRect(frameW, frameH, radius);
+        const inner = shape ? shape(frameW - frame * 2, frameH - frame * 2) : roundRect(frameW - frame * 2, frameH - frame * 2, Math.max(0.01, radius - frame));
+        const f = new THREE.Mesh(extrude(frameShape(outer, inner), 0.026, 0.005), mat(frameColor, 0.35));
+        f.position.set(0.152 * sx, 0, 0);
+        f.rotation.y = 0.12 * sx;
+        g.add(f);
+        if (lens) {
+          const l = new THREE.Mesh(extrude(shape ? shape(frameW - frame * 2, frameH - frame * 2) : roundRect(frameW - frame * 2, frameH - frame * 2, Math.max(0.01, radius - frame)), 0.008, 0), lensMat);
+          l.position.set(0.152 * sx, 0, -0.002);
+          l.rotation.y = 0.12 * sx;
+          g.add(l);
+          // لمعة على العدسة
+          const gl = new THREE.Mesh(new THREE.PlaneGeometry(0.035, (frameH - frame * 2) * 0.7), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, depthWrite: false }));
+          gl.position.set(0.152 * sx - frameW * 0.18, frameH * 0.05, 0.008);
+          gl.rotation.set(0, 0.12 * sx, -0.5);
+          g.add(gl);
+        }
+        // الذراع للإذن
+        add(new THREE.BoxGeometry(0.022, 0.026, 0.4), arm, [0.345 * sx, 0.06, 0.22], [0, -sx * 0.42, 0], [1, 1, 1], 0.4);
+      }
+      add(new THREE.BoxGeometry(0.075, 0.022, 0.022), frameColor, [0, 0.035 + bridgeY - 0.035 + 0.01, 0.42], [0, 0, 0], [1, 1, 1], 0.35);
+      if (tape) add(new THREE.BoxGeometry(0.045, 0.05, 0.04), '#f7f3e8', [0, 0.06, 0.42], [0, 0, 0], [1, 1, 1], 0.9);
+      return g;
+    };
     switch (acc.face) {
       case 'face:sunglasses':
-        for (const sx of [-1, 1]) add(cyl(0.11, 0.11, 0.025, 22), '#0d0d10', [0.15 * sx, 0.035, 0.405], [Math.PI / 2, 0, 0], [1, 1, 0.85], 0.15);
-        add(new THREE.BoxGeometry(0.1, 0.022, 0.02), '#0d0d10', [0, 0.05, 0.42]);
+        glasses({
+          lens: true,
+          frameW: 0.215,
+          frameH: 0.165,
+          radius: 0.06,
+          frame: 0.024,
+          frameColor: '#101014',
+          lensMat: new THREE.MeshStandardMaterial({ color: new THREE.Color('#0b1020'), roughness: 0.08, metalness: 0.55 }),
+        });
         break;
       case 'face:nerd':
-        for (const sx of [-1, 1]) add(new THREE.TorusGeometry(0.09, 0.022, 8, 22), '#3b2a1a', [0.148 * sx, 0.035, 0.41], [0, 0, 0], [1, 1, 1], 0.4);
-        add(new THREE.BoxGeometry(0.08, 0.02, 0.02), '#3b2a1a', [0, 0.045, 0.415]);
-        break;
-      case 'face:clown':
-        add(G.sphere, '#e5383b', [0, -0.05, 0.43], [0, 0, 0], [0.075, 0.075, 0.075], 0.25);
-        break;
-      case 'face:mustache':
-        for (const sx of [-1, 1]) add(G.sphere, '#3b2412', [0.075 * sx, -0.125, 0.395], [0, 0, 0.35 * sx], [0.085, 0.032, 0.035], 0.8);
-        break;
-      case 'face:eyepatch':
-        add(cyl(0.1, 0.1, 0.02, 20), '#111111', [0.148, 0.035, 0.405], [Math.PI / 2, 0, 0]);
-        add(new THREE.TorusGeometry(0.43, 0.012, 6, 30), '#111111', [0, 0.06, 0], [0.15, 0, -0.35]);
+        glasses({
+          lens: true,
+          frameW: 0.2,
+          frameH: 0.17,
+          radius: 0.035,
+          frame: 0.03,
+          frameColor: '#17171b',
+          lensMat: glassMat(),
+          tape: true,
+        });
         break;
       case 'face:star':
+        glasses({
+          lens: true,
+          frameW: 0.25,
+          frameH: 0.25,
+          radius: 0,
+          frame: 0.03,
+          frameColor: '#ff3d9a',
+          lensMat: glassMat('#ffd60a', 0.55),
+          arm: '#ff3d9a',
+          shape: (w) => starShape(w / 2, w / 4.4),
+        });
+        break;
+      case 'face:clown': {
+        // خشم مهرج لمّاع
+        const nose = new THREE.Mesh(G.sphere, new THREE.MeshStandardMaterial({ color: new THREE.Color('#e5383b'), roughness: 0.18, metalness: 0.05 }));
+        nose.position.set(0, -0.055, 0.45);
+        nose.scale.setScalar(0.088);
+        head.add(nose);
+        glow(G.sphereLo, '#ffffff', [-0.028, -0.025, 0.522], [0, 0, 0], [0.018, 0.012, 0.01]);
+        break;
+      }
+      case 'face:mustache': {
+        // شوارب مبرومة: كرات على منحنى تصغر وتلتف للفوك
+        const col = '#2b1a0e';
         for (const sx of [-1, 1]) {
-          add(cyl(0.12, 0.12, 0.025, 5), '#ffd60a', [0.15 * sx, 0.035, 0.405], [Math.PI / 2, 0, 0], [1, 1, 1], 0.3);
-          add(cyl(0.08, 0.08, 0.03, 5), '#ff4f8b', [0.15 * sx, 0.035, 0.41], [Math.PI / 2, 0, 0], [1, 1, 1], 0.3);
+          const n = 16;
+          for (let i = 0; i < n; i++) {
+            const k = i / (n - 1);
+            const x = sx * (0.02 + k * 0.2);
+            const y = -0.118 - Math.sin(k * Math.PI * 0.8) * 0.03 + Math.max(0, k - 0.7) * 0.32;
+            const r = 0.042 * (1 - k * 0.72);
+            add(G.sphere, col, [x, y, faceZ(x, y, 0.012)], [0, 0, 0], [r * 1.25, r, r * 0.9], 0.85);
+          }
+          // اللفّة بآخره
+          add(new THREE.TorusGeometry(0.022, 0.009, 8, 14, Math.PI * 1.4), col, [sx * 0.232, -0.055, faceZ(0.232, -0.055, 0.012)], [0, sx * 0.5, sx > 0 ? 0.6 : Math.PI - 0.6], [1, 1, 1], 0.85);
         }
         break;
-      case 'face:mask':
-        add(new THREE.CylinderGeometry(0.435, 0.415, 0.22, 26, 1, true, -Math.PI * 0.62, Math.PI * 1.24), '#1f1f24', [0, -0.13, 0.02], [0, 0, 0], [1, 1, 1], 0.7);
+      }
+      case 'face:eyepatch': {
+        // رقعة قرصان: جلد أسود منفوخ شوية + حزام مايل حول الراس
+        add(G.sphere, '#121212', [0.148, 0.04, 0.392], [0, 0.25, 0], [0.115, 0.1, 0.035], 0.45);
+        add(cyl(0.006, 0.006, 0.001, 6), '#121212', [0.148, 0.04, 0.43]);
+        const strap = new THREE.Group();
+        strap.position.set(0, 0.095, -0.01);
+        strap.rotation.z = -0.38;
+        head.add(strap);
+        add(new THREE.TorusGeometry(0.452, 0.016, 8, 48), '#1a1a1a', [0, 0, 0], [Math.PI / 2, 0, 0], [1, 1, 0.97], 0.5, strap);
+        // جمجمة صغيرة
+        glow(G.sphereLo, '#f2f2f2', [0.148, 0.05, 0.43], [0, 0, 0], [0.02, 0.018, 0.006]);
         break;
-      case 'face:monocle':
-        add(new THREE.TorusGeometry(0.1, 0.016, 8, 22), '#d4af37', [0.148, 0.035, 0.41], [0, 0, 0], [1, 1, 1], 0.2);
-        add(cyl(0.006, 0.006, 0.3, 6), '#d4af37', [0.24, -0.1, 0.4], [0, 0, 0.3]);
+      }
+      case 'face:mask': {
+        // لثام نينجا: قماش يلف نص الوجه التحتاني (ويغطي الخشم) وعقدة وأطراف ورا الراس
+        const cloth = '#1d2030';
+        const shell = new THREE.SphereGeometry(1, 36, 16, Math.PI / 2 - 1.95, 3.9, Math.PI * 0.515, Math.PI * 0.36);
+        add(shell, matDS(cloth, 0.85), [0, -0.005, 0.005], [0, 0, 0], [0.455, 0.44, 0.47], 0.85);
+        // ثنيات القماش
+        for (const [y, sc] of [
+          [-0.13, 0.465],
+          [-0.24, 0.43],
+        ])
+          add(new THREE.TorusGeometry(1, 0.012, 6, 40, 2.6), shade(cloth, 0.75), [0, y, 0], [Math.PI / 2, 0, Math.PI / 2 - 1.3], [sc, sc * 1.02, 1], 0.9);
+        add(G.sphere, cloth, [0, -0.05, -0.43], [0, 0, 0], [0.075, 0.06, 0.05], 0.85);
+        for (const sx of [-1, 1]) add(G.capsule(0.03, 0.2), cloth, [0.06 * sx, -0.18, -0.46], [0.35, 0, 0.35 * sx], [1, 1, 0.5], 0.85);
         break;
+      }
+      case 'face:monocle': {
+        // مونوكل: إطار ذهب وزجاج وسلسلة نازلة للصدر
+        add(new THREE.TorusGeometry(0.098, 0.016, 10, 28), '#d4af37', [0.148, 0.035, 0.415], [0, 0.12, 0], [1, 1, 1], 0.2);
+        const glass = new THREE.Mesh(new THREE.CircleGeometry(0.094, 28), glassMat('#f5fbff', 0.32));
+        glass.position.set(0.148, 0.035, 0.416);
+        glass.rotation.y = 0.12;
+        head.add(glass);
+        glow(new THREE.PlaneGeometry(0.02, 0.09), '#ffffff', [0.12, 0.05, 0.422], [0, 0.12, -0.5]);
+        const curve = new THREE.CatmullRomCurve3([
+          new THREE.Vector3(0.2, -0.04, 0.4),
+          new THREE.Vector3(0.27, -0.2, 0.36),
+          new THREE.Vector3(0.3, -0.36, 0.3),
+          new THREE.Vector3(0.26, -0.5, 0.26),
+        ]);
+        add(new THREE.TubeGeometry(curve, 24, 0.008, 6, false), '#d4af37', [0, 0, 0], [0, 0, 0], [1, 1, 1], 0.25);
+        break;
+      }
       default:
     }
   }
@@ -467,20 +682,32 @@ class Character {
     for (const o of this.outlines) o.visible = on;
   }
 
-  setHome(x, z) {
+  /**
+   * مكانه بالصف. enter = {x, delay, speed}: يجي يمشي من برّا الشاشة (من اليسار) لمكانه.
+   * إذا تغيّر مكانه وهو ماشي (دخل لاعب جديد) يعدّل طريقه.
+   */
+  setHome(x, z, enter = null) {
     this.home.set(x, 0, z);
     if (!this.placed) {
-      this.pos.copy(this.home);
       this.placed = true;
-    } else if (!this.atMic && !this.aside && !this.walking) this.walkTo(this.home);
+      if (enter) {
+        this.pos.set(enter.x, 0, z);
+        this.waitUntil = performance.now() + (enter.delay || 0);
+        this.entering = true;
+        this.walkTo(this.home, () => (this.entering = false), enter.speed);
+      } else this.pos.copy(this.home);
+    } else if (!this.atMic && !this.aside) {
+      if (this.walking && this.target && this.target.distanceTo(this.home) < 0.01) return;
+      this.walkTo(this.home, this.entering ? () => (this.entering = false) : null, this.entering ? this.speed : undefined);
+    }
   }
 
-  walkTo(v, onArrive) {
+  walkTo(v, onArrive, speed) {
     this.target = v.clone();
     this.walking = true;
     this.onArrive = onArrive || null;
     const d = Math.hypot(v.x - this.pos.x, v.z - this.pos.z);
-    this.speed = Math.max(2.6, d / 0.95);
+    this.speed = speed || Math.max(2.6, d / 0.95);
   }
 
   goToMic() {
@@ -503,7 +730,9 @@ class Character {
     const now = performance.now();
     if (this.mood !== 'idle' && now > this.moodUntil) this.mood = 'idle';
     let walkAmt = 0;
-    if (this.walking && this.target) {
+    // ينتظر دوره برّا الشاشة حتى يدخلون بالصف واحد ورا الثاني
+    const waiting = this.waitUntil && now < this.waitUntil;
+    if (this.walking && this.target && !waiting) {
       const d = new THREE.Vector3().subVectors(this.target, this.pos);
       d.y = 0;
       const dist = d.length();
@@ -536,7 +765,7 @@ class Character {
     let sway = Math.sin(ph * 1.05) * 0.02;
 
     if (walkAmt) {
-      const w = t * 10;
+      const w = t * Math.max(10, (this.speed || 2.6) * 2.1);
       P.legL.rotation.x = Math.sin(w) * 0.6;
       P.legR.rotation.x = -Math.sin(w) * 0.6;
       armSwing = Math.sin(w) * 0.55;
@@ -1015,9 +1244,23 @@ export class Stage {
     return out;
   }
 
-  /** players: [{uid, skin}] بالترتيب */
-  setPlayers(players) {
+  /** أبعد نقطة يسار ما تبين بالشاشة (اللقطة الواسعة) — منها يدخلون اللاعبين */
+  offLeftX() {
+    const S = SHOTS.wide;
+    const dist = Math.hypot(S.pos[0] - S.look[0], S.pos[1] - S.look[1], S.pos[2] - S.look[2]);
+    const half = dist * Math.tan((S.fov * Math.PI) / 360) * Math.max(1, this.w / Math.max(1, this.h));
+    let maxX = 0;
+    for (const c of this.chars.values()) maxX = Math.max(maxX, Math.abs(c.home.x));
+    return -Math.max(half + 2, maxX + 4, 8);
+  }
+
+  /**
+   * players: [{uid, skin, acc}] بالترتيب.
+   * enter: اللاعبين الجدد يجون يمشون من اليسار ويوكفون بمكانهم بالصف (اللي مكانه أبعد يدخل أول)
+   */
+  setPlayers(players, { enter = false } = {}) {
     const seen = new Set();
+    const fresh = new Set();
     players.forEach((p) => {
       seen.add(p.uid);
       let c = this.chars.get(p.uid);
@@ -1025,6 +1268,7 @@ export class Stage {
         c = new Character(p.skin, p.acc || null);
         this.chars.set(p.uid, c);
         this.scene.add(c.root);
+        fresh.add(p.uid);
       } else if (c.skin !== p.skin || c.accKey !== accKey(p.acc)) c.build(p.skin, p.acc || null);
     });
     for (const [uid, c] of this.chars) {
@@ -1036,11 +1280,18 @@ export class Stage {
     this.order = players.map((p) => p.uid);
     const n = this.order.length;
     const spacing = n <= 3 ? 3.0 : 2.7;
+    const coming = [];
     this.order.forEach((uid, i) => {
       let x = (i - (n - 1) / 2) * spacing;
       if (n === 1) x = -1.5;
-      this.chars.get(uid).setHome(x, BACK_Z);
+      const c = this.chars.get(uid);
+      if (enter && fresh.has(uid)) coming.push({ c, x });
+      else c.setHome(x, BACK_Z);
     });
+    if (coming.length) {
+      const from = this.offLeftX();
+      coming.sort((a, b) => b.x - a.x).forEach(({ c, x }, k) => c.setHome(x, BACK_Z, { x: from - k * 1.3, delay: k * 300, speed: 5.4 }));
+    }
   }
 
   char(uid) {
@@ -1130,8 +1381,8 @@ export class Stage {
 const portraitCache = new Map();
 let portraitRig = null;
 
-export function portrait(skinIdx, acc = null) {
-  const pkey = skinIdx + '|' + accKey(acc);
+export function portrait(skinIdx, acc = null, size = 180) {
+  const pkey = skinIdx + '|' + accKey(acc) + (size !== 180 ? '|' + size : '');
   if (portraitCache.has(pkey)) return portraitCache.get(pkey);
   if (!portraitRig) {
     const canvas = document.createElement('canvas');
@@ -1151,6 +1402,7 @@ export function portrait(skinIdx, acc = null) {
     portraitRig = { renderer, scene, cam, canvas };
   }
   const { renderer, scene, cam, canvas } = portraitRig;
+  if (canvas.width !== size) renderer.setSize(size, size, false);
   // قبعة (أو تاج الملك)؟ نبعّد الكاميرا شوية حتى تبين كلها
   const S = SKINS[((skinIdx % SKINS.length) + SKINS.length) % SKINS.length];
   if ((acc && acc.head) || S.crown) {

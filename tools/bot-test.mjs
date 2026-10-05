@@ -153,7 +153,9 @@ check(ans && ans.text.includes('جاري التحميل') && lib.failed === 1 &&
 await update({ from: user, chat: pchat(user), voice: { file_id: 'FILEID_voice_x', duration: 2 } });
 await wait(300);
 m = await lastSend();
-check(m && m.text.includes('بس الأدمن'), 'غير الأدمن ما يكدر يضيف');
+check(m && m.chat_id === 99 && m.text.includes('اكتب اسمه'), 'غير الأدمن: الصوت يصير اقتراح (يطلب اسمه) وما ينضاف مباشرة');
+await update({ from: user, chat: pchat(user), text: '/cancel' });
+await wait(300);
 
 await update({ from: user, chat: group, text: '/play@qallidha_test_bot' });
 await wait(500);

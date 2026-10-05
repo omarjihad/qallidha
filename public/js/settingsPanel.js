@@ -196,6 +196,7 @@ export function openSettings({ inGame = false, onClose = null, stats = null } = 
       row('🔔', t('أصوات الواجهة'), slider('sfx')),
       row('📳', t('الاهتزاز'), toggle('haptics')),
       row('🎤', t('المايك'), seg('mic', MIC), micHint),
+      row('🗣️', t('الدردشة الصوتية'), toggle('voice'), t('تسمع ربعك وتحچي وياهم بالغرفة — المايك ينسد لوحده وقت التقليد')),
       row('😀', t('تفاعلات اللاعبين'), toggle('reactions')),
       el(
         'div',

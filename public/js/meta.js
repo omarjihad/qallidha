@@ -1,7 +1,7 @@
 // الحساب داخل اللعبة: اللفل والمايكات، المتجر واللبس، الرويال باس، الصندوق اليومي، الشراء بالنجوم، ومكافآت نهاية اللعبة.
 // كل شي هنا للاعبين تيليجرام (الضيف يلعب عادي بس ما يجمع).
 
-import { ITEMS, ITEM, CUR, RARITY, PASS, passReward, levelProgress, isFree, ADS, STAR_PACKS, packPrice, packBonus } from './catalog.js';
+import { ITEMS, ITEM, CUR, RARITY, PASS, passReward, levelProgress, isFree, ADS, STAR_PACKS, packPrice, packBonus, MAX_LEVEL, pointsForLevel, levelReward } from './catalog.js';
 import { THEMES, portrait } from './stage.js';
 import { $, el, toast, overlay } from './ui.js';
 import { authBody } from './net.js';
@@ -511,14 +511,14 @@ export class Meta {
   /* ============================================================ واجهات صغيرة */
 
   /** شارة الحساب بالقائمة: اللفل والمايكات */
-  chip(user) {
+  chip(user, { onClose = null } = {}) {
     const name = (user && user.name) || '';
     const photo = user && user.photo;
     const p = this.profile;
     const lp = p ? p.level : levelProgress(0);
     return el(
-      'div',
-      { class: 'profile-chip' },
+      'button',
+      { class: 'profile-chip', 'aria-label': t('⭐ اللفلات'), onclick: () => this.openLevels({ onClose }) },
       photo ? el('img', { src: photo, alt: '' }) : el('span', { class: 'pc-ph' }, (name || '؟').slice(0, 1)),
       el(
         'div',
@@ -535,6 +535,84 @@ export class Meta {
           : el('small', {}, t('ضيف — افتح من تيليجرام حتى تجمع')),
       ),
     );
+  }
+
+  /* ============================================================ اللفلات (من الضغط على اسمك وصورتك) */
+
+  /** كم لفل باللعبة، جائزة كل لفل، شلون توصله، وشكد باقيلك */
+  openLevels({ onClose = null } = {}) {
+    if (!this.tg) return this.tgOnly();
+    haptic('light');
+    const p = this.profile;
+    const pts = p.points || 0;
+    const lp = p.level;
+    const max = lp.level >= MAX_LEVEL;
+    const next = Math.min(MAX_LEVEL, lp.level + 1);
+    const left = Math.max(0, lp.to - pts);
+    const close = () => {
+      this.panel = null;
+      if (onClose) onClose();
+    };
+    const rows = [];
+    let curRow = null;
+    for (let L = 1; L <= MAX_LEVEL; L++) {
+      const need = pointsForLevel(L);
+      const done = L <= lp.level;
+      const row = el(
+        'div',
+        { class: 'lv-row' + (done ? ' done' : '') + (L === lp.level ? ' cur' : '') + (L === next && !max ? ' next' : '') + (L % 10 === 0 ? ' big' : '') },
+        el('span', { class: 'lv-n' }, String(L)),
+        el('span', { class: 'lv-need' }, L === 1 ? t('البداية') : t('{n} نقطة', { n: fmt(need) })),
+        el('span', { class: 'lv-rw' }, L === 1 ? '—' : `${CUR.icon} ${fmt(levelReward(L))}`),
+        el('span', { class: 'lv-st' }, done ? '✅' : L === next ? t('باقي {n}', { n: fmt(need - pts) }) : '🔒'),
+      );
+      if (L === lp.level) curRow = row;
+      rows.push(row);
+    }
+    const list = el('div', { class: 'lv-list' }, rows);
+    const panel = el(
+      'div',
+      { class: 'panel levels' },
+      el('button', { class: 'xbtn', 'aria-label': t('سكّر'), onclick: close }, '✕'),
+      el('div', { class: 'panel-title' }, t('⭐ اللفلات')),
+      el(
+        'div',
+        { class: 'lv-top' },
+        el(
+          'div',
+          { class: 'lv-now' },
+          el('div', { class: 'lv-big' }, String(lp.level)),
+          el('small', {}, t('لفلك من {max}', { max: MAX_LEVEL })),
+        ),
+        el(
+          'div',
+          { class: 'lv-prog' },
+          el('div', { class: 'lv-bar big' }, el('i', { style: { width: `${Math.round(lp.frac * 100)}%` } })),
+          el(
+            'div',
+            { class: 'lv-left' },
+            max
+              ? t('🏆 وصلت آخر لفل!')
+              : t('باقيلك {n} نقطة للفل {L} — جائزته {r}', { n: fmt(left), L: next, r: `${CUR.icon} ${fmt(levelReward(next))}` }),
+          ),
+          el('div', { class: 'lv-total' }, t('مجموع نقاطك: {n}', { n: fmt(pts) })),
+        ),
+      ),
+      el(
+        'div',
+        { class: 'lv-how' },
+        el('div', {}, t('🎮 شلون تصعد: كل نقطة تجيبها باللعب (درجة التقليد + العجلة) تنحسب للفل')),
+        el('div', {}, t('🎁 كل لفل جديد = {a} مايك، وكل 10 لفلات = {b} مايك', { a: levelReward(2), b: levelReward(10) })),
+        el('div', {}, t('📈 كل ما يصعد اللفل يحتاج نقاط أكثر شوية — والعب ويا ربعك حتى تجمع أسرع')),
+      ),
+      list,
+    );
+    this.panel = { kind: 'levels', render: () => null };
+    this.mount(panel);
+    // نبدي القائمة من لفلك الحالي
+    requestAnimationFrame(() => {
+      if (curRow) list.scrollTop = Math.max(0, curRow.offsetTop - list.offsetTop - list.clientHeight / 2 + curRow.offsetHeight / 2);
+    });
   }
 
   /** مكافآت نهاية اللعبة (لي أنا) */

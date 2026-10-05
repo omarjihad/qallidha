@@ -4,20 +4,34 @@ import { SR, resample, toMono, peaks, peakOf } from './dsp.js';
 import { MAX_REC } from './shared.js';
 import { settings, onSetting, releaseMicAfterRecord } from './settings.js';
 
+// on = تسجيل التقليد (بوقت دقيق)، tap = قطع متواصلة للدردشة الصوتية
 const WORKLET_SRC = `
 class QdRec extends AudioWorkletProcessor {
   constructor() {
     super();
     this.on = false;
+    this.tap = false;
     this.buf = new Float32Array(2048);
     this.n = 0;
     this.t0 = 0;
-    this.port.onmessage = (e) => { this.on = !!e.data.on; if (!this.on && this.n) { this.flush(); } this.n = 0; };
+    this.tb = new Float32Array(1024);
+    this.tn = 0;
+    this.port.onmessage = (e) => {
+      const m = e.data || {};
+      if ('tap' in m) { this.tap = !!m.tap; this.tn = 0; }
+      if ('on' in m) { this.on = !!m.on; if (!this.on && this.n) { this.flush(); } this.n = 0; }
+    };
   }
   flush() { this.port.postMessage({ t: this.t0, d: this.buf.slice(0, this.n) }); this.n = 0; }
   process(inputs) {
     const ch = inputs[0] && inputs[0][0];
-    if (!ch || !this.on) return true;
+    if (!ch) return true;
+    if (this.tap) {
+      if (this.tn + ch.length > this.tb.length) { this.port.postMessage({ tap: 1, d: this.tb.slice(0, this.tn) }); this.tn = 0; }
+      this.tb.set(ch, this.tn);
+      this.tn += ch.length;
+    }
+    if (!this.on) return true;
     if (this.n === 0) this.t0 = currentTime;
     if (this.n + ch.length > this.buf.length) { this.flush(); this.t0 = currentTime; }
     this.buf.set(ch, this.n);
@@ -58,6 +72,11 @@ export class AudioEngine {
     this.cache = new Map();
     this.sfxBufs = null;
     this.muted = false;
+    // الدردشة الصوتية: قطع المايك المتواصلة، والمايك يبقى مفتوح طول ما الدردشة شغّالة
+    this.tapFn = null;
+    this.tapOwner = null;
+    this.keepOpen = false;
+    this.micListeners = new Set();
     onSetting((k) => {
       if (k === 'volume') this.applyVolume();
     });
@@ -291,7 +310,8 @@ export class AudioEngine {
           this.workletLoaded = true;
         }
         this.recNode = new AudioWorkletNode(this.ctx, 'qd-rec', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
-        this.recNode.port.onmessage = (e) => this.pushChunk(e.data.t, e.data.d);
+        this.recNode.port.onmessage = (e) => (e.data.tap ? this.tapFn && this.tapFn(e.data.d) : this.pushChunk(e.data.t, e.data.d));
+        if (this.tapFn) this.recNode.port.postMessage({ tap: true });
         ok = true;
       } catch {
         ok = false;
@@ -300,8 +320,9 @@ export class AudioEngine {
     if (!ok) {
       const sp = this.ctx.createScriptProcessor(2048, 1, 1);
       sp.onaudioprocess = (e) => {
-        if (!this.armed) return;
         const d = e.inputBuffer.getChannelData(0);
+        if (this.tapFn) this.tapFn(Float32Array.from(d));
+        if (!this.armed) return;
         const t = (e.playbackTime || this.ctx.currentTime) - (2 * 2048) / this.ctx.sampleRate;
         this.pushChunk(t, Float32Array.from(d));
       };
@@ -310,7 +331,39 @@ export class AudioEngine {
     this.micSrc.connect(this.recNode);
     this.recNode.connect(this.sink);
     this.micState = 'on';
+    this.micChanged();
     return true;
+  }
+
+  /** يبلّغ اللي يتابعون المايك (زر الدردشة) */
+  onMic(fn) {
+    this.micListeners.add(fn);
+    return () => this.micListeners.delete(fn);
+  }
+
+  micChanged() {
+    for (const fn of this.micListeners) {
+      try {
+        fn(this.micState);
+      } catch {
+        /* */
+      }
+    }
+  }
+
+  /** قطع متواصلة من المايك (للدردشة) — صاحب واحد بالمرة */
+  tap(owner, fn) {
+    if (this.tapOwner === owner && this.tapFn) return;
+    this.tapOwner = owner;
+    this.tapFn = fn;
+    if (this.recNode && this.recNode.port) this.recNode.port.postMessage({ tap: true });
+  }
+
+  untap(owner) {
+    if (owner && this.tapOwner !== owner) return;
+    this.tapFn = null;
+    this.tapOwner = null;
+    if (this.recNode && this.recNode.port) this.recNode.port.postMessage({ tap: false });
   }
 
   closeMic() {
@@ -326,6 +379,7 @@ export class AudioEngine {
     this.recNode = null;
     this.micSrc = null;
     if (this.micState === 'on') this.micState = 'off';
+    this.micChanged();
   }
 
   /**
@@ -334,7 +388,8 @@ export class AudioEngine {
    * اللاعب يكدر يغيّرها من الإعدادات.
    */
   get releaseAfterRecord() {
-    return releaseMicAfterRecord();
+    // الدردشة الصوتية شغّالة: المايك يبقى مفتوح
+    return releaseMicAfterRecord() && !this.keepOpen;
   }
 
   pushChunk(t, d) {

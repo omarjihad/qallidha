@@ -168,6 +168,31 @@ button { font-family: inherit; }
   display: none; font-size: calc(var(--u) * 4.2);
 }
 :root[data-screen='room'] #setBtn { display: grid; }
+/* الدردشة الصوتية: زر مايكي جنب الإعدادات */
+#chatBtn {
+  position: absolute; top: calc(var(--safe-top) + var(--u) * 3); left: calc(var(--safe-left) + var(--u) * 24); z-index: 10;
+  display: none; font-size: calc(var(--u) * 4.4); transition: background 0.2s, box-shadow 0.2s, opacity 0.2s;
+}
+:root[data-screen='room'] #chatBtn:not([data-state='hidden']) { display: grid; }
+#chatBtn[data-state='on'] { background: rgba(31, 160, 70, 0.55); }
+#chatBtn[data-state='on'].live { box-shadow: 0 0 0 calc(var(--u) * 0.6) rgba(80, 255, 120, 0.75), 0 0 calc(var(--u) * 3) rgba(80, 255, 120, 0.8); }
+#chatBtn[data-state='off'] { opacity: 0.8; }
+#chatBtn[data-state='lock'] { opacity: 0.55; background: rgba(0, 0, 0, 0.45); }
+#chatBtn[data-state='need'] { background: rgba(255, 140, 30, 0.55); }
+/* كارت اللي يحچي يضوي، ودوسة على كارت لاعب ثاني تكتمه */
+:root[data-screen='room'] .pcard:not(.me) { pointer-events: auto; cursor: pointer; }
+.pc-talk {
+  position: absolute; bottom: calc(var(--u) * -1.5); left: calc(var(--u) * -1.5); width: calc(var(--u) * 5); height: calc(var(--u) * 5);
+  display: grid; place-items: center; border-radius: 50%; background: #22c55e; font-size: calc(var(--u) * 2.8);
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.3); transform: scale(0); transition: transform 0.15s;
+}
+.pcard.talking { box-shadow: 0 0 0 calc(var(--u) * 0.45) #3ee86b, 0 0 calc(var(--u) * 2.6) rgba(62, 232, 107, 0.85); }
+.pcard.talking .pc-talk { transform: scale(1); animation: talkPulse 0.5s infinite alternate; }
+@keyframes talkPulse { to { transform: scale(1.18); } }
+.pc-mute {
+  position: absolute; top: calc(var(--u) * 1.2); left: calc(var(--u) * 1.2); width: calc(var(--u) * 4.6); height: calc(var(--u) * 4.6);
+  display: grid; place-items: center; border-radius: 50%; background: rgba(20, 20, 30, 0.75); font-size: calc(var(--u) * 2.8);
+}
 .icon-btn {
   width: calc(var(--u) * 9); height: calc(var(--u) * 9); border-radius: 50%; border: 0; place-items: center;
   background: rgba(0, 0, 0, 0.3); color: #fff; font-size: calc(var(--u) * 4); cursor: pointer; backdrop-filter: blur(4px);
@@ -785,3 +810,94 @@ button.mics-pill { border: 0; cursor: pointer; font-family: inherit; font-weight
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
+
+/* ===================== v1.6: اللفلات (من الضغط على اسمك) ===================== */
+button.profile-chip { border: 0; color: #fff; font: inherit; cursor: pointer; text-align: start; }
+button.profile-chip:active { transform: scale(0.97); }
+.panel.levels {
+  width: min(100%, calc(var(--u) * 150)); height: 100%; max-height: none;
+  display: flex; flex-direction: column; padding: calc(var(--u) * 3) calc(var(--u) * 4); gap: calc(var(--u) * 1.6);
+}
+.panel.levels .panel-title { margin-bottom: 0; }
+.lv-top { display: flex; align-items: center; gap: calc(var(--u) * 4); background: rgba(0, 0, 0, 0.25); border-radius: calc(var(--u) * 3); padding: calc(var(--u) * 2) calc(var(--u) * 3); }
+.lv-now { display: flex; flex-direction: column; align-items: center; line-height: 1; }
+.lv-big {
+  width: calc(var(--u) * 15); height: calc(var(--u) * 15); border-radius: 50%; display: grid; place-items: center;
+  font-size: calc(var(--u) * 7.5); font-weight: 800; color: #3a2400;
+  background: radial-gradient(circle at 35% 30%, #fff3b0, #f0a500 70%); box-shadow: 0 0 0 calc(var(--u) * 0.6) #fff, 0 calc(var(--u) * 0.8) calc(var(--u) * 1.6) rgba(0, 0, 0, 0.4);
+}
+.lv-now small { margin-top: calc(var(--u) * 1.4); font-size: calc(var(--u) * 2.8); opacity: 0.85; white-space: nowrap; }
+.lv-prog { flex: 1; display: flex; flex-direction: column; gap: calc(var(--u) * 1.2); min-width: 0; }
+.lv-bar.big { width: 100%; height: calc(var(--u) * 3); }
+.lv-left { font-size: calc(var(--u) * 3.6); font-weight: 800; }
+.lv-total { font-size: calc(var(--u) * 3); opacity: 0.75; }
+.lv-how { display: grid; grid-template-columns: repeat(3, 1fr); gap: calc(var(--u) * 1.6); font-size: calc(var(--u) * 2.9); line-height: 1.35; }
+.lv-how > div { background: rgba(255, 255, 255, 0.07); border-radius: calc(var(--u) * 2); padding: calc(var(--u) * 1.4) calc(var(--u) * 2); }
+.lv-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: calc(var(--u) * 0.8); padding-inline-end: calc(var(--u) * 1); }
+.lv-row {
+  display: grid; grid-template-columns: calc(var(--u) * 10) 1fr calc(var(--u) * 16) calc(var(--u) * 22); align-items: center; gap: calc(var(--u) * 2);
+  background: rgba(0, 0, 0, 0.22); border-radius: calc(var(--u) * 2); padding: calc(var(--u) * 1) calc(var(--u) * 2.4); font-size: calc(var(--u) * 3.2);
+}
+.lv-row .lv-n {
+  width: calc(var(--u) * 7.4); height: calc(var(--u) * 7.4); border-radius: 50%; display: grid; place-items: center; font-weight: 800;
+  background: rgba(255, 255, 255, 0.12);
+}
+.lv-row.done .lv-n { background: linear-gradient(180deg, #ffe27a, #f0a500); color: #3a2400; }
+.lv-row.done { opacity: 0.72; }
+.lv-row.cur { opacity: 1; background: rgba(255, 196, 0, 0.22); box-shadow: inset 0 0 0 calc(var(--u) * 0.4) #ffd54a; }
+.lv-row.next { background: rgba(80, 200, 255, 0.16); box-shadow: inset 0 0 0 calc(var(--u) * 0.35) rgba(120, 210, 255, 0.7); }
+.lv-row.big .lv-rw { color: #ffe066; font-weight: 800; }
+.lv-row .lv-need { opacity: 0.85; direction: ltr; text-align: start; unicode-bidi: plaintext; }
+.lv-row .lv-st { text-align: end; font-weight: 800; white-space: nowrap; }
+.lv-row.next .lv-st { color: #9fe3ff; }
+
+/* ===================== v1.6: الغرف العامة ===================== */
+.panel.rooms {
+  width: min(100%, calc(var(--u) * 170)); height: 100%; max-height: none;
+  display: flex; flex-direction: column; padding: calc(var(--u) * 3) calc(var(--u) * 4); gap: calc(var(--u) * 1.8);
+}
+.panel.rooms .panel-title { margin-bottom: 0; }
+.rooms-actions { display: flex; gap: calc(var(--u) * 2.4); justify-content: center; flex-wrap: wrap; }
+.rooms-actions .btn { min-width: calc(var(--u) * 48); }
+.rooms-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: calc(var(--u) * 1.4); padding-inline-end: calc(var(--u) * 1); }
+.room-row {
+  display: flex; align-items: center; gap: calc(var(--u) * 2.4); background: rgba(0, 0, 0, 0.25); border-radius: calc(var(--u) * 3);
+  padding: calc(var(--u) * 1.4) calc(var(--u) * 2.4); animation: fadeIn 0.25s;
+}
+.room-row.busy { opacity: 0.6; }
+.rr-faces { display: flex; direction: ltr; }
+.rr-faces span {
+  width: calc(var(--u) * 7); height: calc(var(--u) * 7); border-radius: 50%; display: grid; place-items: center; margin-inline-end: calc(var(--u) * -1.8);
+  background: var(--c, var(--pink)); font-size: calc(var(--u) * 3.4); font-weight: 800; box-shadow: 0 0 0 calc(var(--u) * 0.4) #3a1420;
+}
+.rr-faces span.empty { background: rgba(255, 255, 255, 0.1); box-shadow: inset 0 0 0 calc(var(--u) * 0.3) rgba(255, 255, 255, 0.25); }
+.rr-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: calc(var(--u) * 0.3); }
+.rr-info b { font-size: calc(var(--u) * 3.8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; unicode-bidi: plaintext; }
+.rr-info small { font-size: calc(var(--u) * 2.9); opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rr-code { font-size: calc(var(--u) * 3.2); color: #9ff0b5; direction: ltr; letter-spacing: 0.06em; opacity: 0.9; }
+.rr-n { font-size: calc(var(--u) * 3.6); font-weight: 800; white-space: nowrap; direction: ltr; }
+.room-row .btn { padding: calc(var(--u) * 1.4) calc(var(--u) * 4); font-size: calc(var(--u) * 3.6); }
+.rooms-empty { flex: 1; display: grid; place-items: center; text-align: center; font-size: calc(var(--u) * 3.8); opacity: 0.85; line-height: 1.5; }
+.rooms-empty b { display: block; font-size: calc(var(--u) * 9); }
+.rooms-note { font-size: calc(var(--u) * 2.8); opacity: 0.65; text-align: center; }
+
+/* ===================== v1.6: الصيانة ===================== */
+.panel.maint { text-align: center; max-width: calc(var(--u) * 130); }
+.panel.maint .big-ic { font-size: calc(var(--u) * 16); line-height: 1.1; }
+.panel.maint .hint { margin: calc(var(--u) * 2) 0 calc(var(--u) * 3); }
+.side-btn.addsnd { background: linear-gradient(180deg, rgba(60, 200, 120, 0.45), rgba(10, 80, 40, 0.55)); }
+
+/* صوت ضافه لاعب: صورته واسمه وقت المثال */
+.meme-by {
+  position: absolute; left: 50%; top: calc(var(--safe-top) + var(--u) * 5); transform: translateX(-50%);
+  display: flex; align-items: center; gap: calc(var(--u) * 2.4); background: rgba(0, 0, 0, 0.5); border-radius: 99px;
+  padding: calc(var(--u) * 1.2) calc(var(--u) * 4.4) calc(var(--u) * 1.2) calc(var(--u) * 1.2); backdrop-filter: blur(4px);
+  box-shadow: 0 0 0 calc(var(--u) * 0.4) rgba(255, 255, 255, 0.18); animation: popIn 0.4s 0.2s both; white-space: nowrap;
+}
+#meme .meme-by img, .meme-by .mb-ph {
+  position: static; width: calc(var(--u) * 12); height: calc(var(--u) * 12); border-radius: 50%; object-fit: cover; filter: none;
+  box-shadow: 0 0 0 calc(var(--u) * 0.5) #fff;
+}
+.meme-by .mb-ph { display: grid; place-items: center; background: var(--pink); font-size: calc(var(--u) * 6); }
+.meme-by small { display: block; font-size: calc(var(--u) * 2.8); opacity: 0.85; }
+.meme-by b { display: block; font-size: calc(var(--u) * 4.6); unicode-bidi: plaintext; max-width: calc(var(--u) * 60); overflow: hidden; text-overflow: ellipsis; }

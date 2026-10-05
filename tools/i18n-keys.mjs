@@ -66,7 +66,7 @@ literalArrays('public/js/ads.js', /[\s\S]*/);
 // 3) رسائل السيرفر اللي توصل للواجهة (error: '...')
 for (const f of ['src/economy.js', 'src/worker.js', 'src/auth.js', 'src/telegram.js']) {
   const src = readFileSync(f, 'utf8');
-  for (const m of src.matchAll(/(?:error|message|m)\s*[:=]\s*'([^'\\]*(?:\\.[^'\\]*)*)'/g)) add(unescape(m[1]), f);
+  for (const m of src.matchAll(/\b(?:error|message|m)\s*[:=]\s*'([^'\\]*(?:\\.[^'\\]*)*)'/g)) add(unescape(m[1]), f);
   for (const m of src.matchAll(/new AuthError\('([^']*)'\)/g)) add(m[1], f);
 }
 

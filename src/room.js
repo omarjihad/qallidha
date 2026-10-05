@@ -147,11 +147,14 @@ export class Room extends DurableObject {
     const on = this.connected().length;
     const n = on ? st.order.length : 0;
     const phase = st.phase === 'lobby' ? 'lobby' : 'game';
-    const sig = `${n}|${phase}|${st.autoAt || 0}`;
+    // أسماء وشكل اللي بالغرفة (تبين بقائمة الغرف العامة)
+    const players = st.order.map((u) => ({ n: st.players[u].name, s: st.players[u].skin }));
+    const host = st.host && st.players[st.host] ? st.players[st.host].name : '';
+    const sig = `${n}|${phase}|${st.autoAt || 0}|${host}|${players.map((p) => p.n + ':' + p.s).join(',')}`;
     if (sig === this.mmSig) return;
     this.mmSig = sig;
     try {
-      await this.hub().mmReport(st.code, { n, phase, startsAt: st.autoAt || 0 });
+      await this.hub().mmReport(st.code, { n, phase, startsAt: st.autoAt || 0, host, players });
     } catch (e) {
       this.mmSig = '';
       console.log('mmReport failed', e && e.message);
@@ -329,7 +332,12 @@ export class Room extends DurableObject {
     const a = ws.deserializeAttachment() || {};
     const uid = a.uid;
     if (!this.st || !uid || a.replaced || !this.st.players[uid]) return;
-    if (typeof msg !== 'string') return this.onTake(uid, msg);
+    if (typeof msg !== 'string') {
+      const u8 = new Uint8Array(msg);
+      // 3 = دردشة صوتية: نوصلها للباقين فورًا (ما تنحفظ)
+      if (u8[0] === 3) return this.onVoice(uid, u8, ws);
+      return this.onTake(uid, msg);
+    }
     let m;
     try {
       m = JSON.parse(msg);
@@ -463,6 +471,40 @@ export class Room extends DurableObject {
     delete st.players[uid];
     st.order = st.order.filter((u) => u !== uid);
     if (st.host === uid) this.pickHost();
+  }
+
+  /**
+   * دردشة صوتية: [3, seq, ...صوت ADPCM] من اللاعب ← [3, seat, seq, ...] للباقين.
+   * تنسد وقت المثال والتسجيل (perform) مثل الأصلية. حد للحجم والسرعة ضد الإزعاج.
+   */
+  onVoice(uid, u8, ws) {
+    const st = this.st;
+    if (st.phase === 'perform' || u8.length < 8 || u8.length > 900) return;
+    const now = Date.now();
+    const rl = this.voiceRate || (this.voiceRate = new Map());
+    const r = rl.get(uid) || { t: now, n: 0 };
+    if (now - r.t > 1000) {
+      r.t = now;
+      r.n = 0;
+    }
+    if (++r.n > 16) return;
+    rl.set(uid, r);
+    const seat = st.order.indexOf(uid);
+    if (seat < 0) return;
+    const out = new Uint8Array(u8.length + 1);
+    out[0] = 3;
+    out[1] = seat;
+    out.set(u8.subarray(1), 2);
+    for (const w of this.ctx.getWebSockets()) {
+      if (w === ws) continue;
+      const at = w.deserializeAttachment() || {};
+      if (!at.uid || at.replaced || at.uid === uid) continue;
+      try {
+        w.send(out);
+      } catch {
+        /* */
+      }
+    }
   }
 
   /** تسجيل لاعب: [1, round, 0, 0] + μ-law */
@@ -648,7 +690,13 @@ export class Room extends DurableObject {
     }
     let at = now + T.PLAY_LEAD;
     st.play = [];
-    for (const uid of st.order) {
+    // ترتيب الإعادة عشوائي كل جولة (مو أول واحد دخل الغرفة دائمًا أول)
+    const order = [...st.order];
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    for (const uid of order) {
       const src = voice[uid];
       if (!st.takes[src]) {
         st.play.push({ uid, src, at, none: true, dur: 0 });

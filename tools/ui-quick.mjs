@@ -1,4 +1,4 @@
-// لقطات اللعب العشوائي بالمتصفح: زر «🎲 لعب عشوائي» ← ندوّر لاعبين ← بوت يدخل ← عد تنازلي ← تبدي لوحدها
+// لقطات اللعب العشوائي بالمتصفح: زر «🎲 لعب عشوائي» ← قائمة الغرف ← «⚡ دخول سريع» ← ندوّر لاعبين ← بوت يدخل ← عد تنازلي ← تبدي لوحدها
 // ← النهاية («اللعبة الجاية بعد…» + «🎲 غرفة ثانية») ← ترجع غرفة انتظار.
 //   node tools/ui-quick.mjs <out-dir>
 import { chromium } from 'playwright';
@@ -113,7 +113,11 @@ const hint = () => page.$eval('.lobby-hint', (e) => e.textContent).catch(() => '
 await page.goto(BASE + '/');
 await page.waitForTimeout(2500);
 await shot('menu');
+// «🎲 لعب عشوائي» يفتح قائمة الغرف العامة، ومنها «⚡ دخول سريع»
 await tap('.menu-btns .btn.quick');
+await page.waitForSelector('.panel.rooms', { timeout: 8000 });
+await shot('rooms-list');
+await tap('.panel.rooms .rooms-actions .btn.blue');
 await page.waitForSelector('#lobbyBar .room-code b', { timeout: 15000 });
 await page.waitForTimeout(1500);
 const s0 = await st();

@@ -1,6 +1,6 @@
 // الإقلاع: تيليجرام + المسرح + القائمة الرئيسية.
 
-import { initTelegram, stageSize, onViewportChange, startParam, insideTelegram, unsafeUser, haptic, isRotated, setHaptics } from './tg.js';
+import { initTelegram, stageSize, onViewportChange, startParam, insideTelegram, unsafeUser, haptic, isRotated, setHaptics, openTgLink } from './tg.js';
 import { Stage } from './stage.js';
 import { AudioEngine } from './audio.js';
 import { Game } from './game.js';
@@ -22,6 +22,7 @@ let config = {};
 let profile = null;
 let game = null;
 let busy = false;
+let roomsPanel = null; // قائمة الغرف العامة مفتوحة
 const meta = new Meta({});
 
 // اسم اللعبة بلغة اللاعب
@@ -100,6 +101,12 @@ $('#exitBtn').addEventListener('click', () => game && game.askLeave());
 $('#exitBtn').setAttribute('aria-label', t('خروج'));
 $('#setBtn').addEventListener('click', () => openGameSettings());
 $('#setBtn').setAttribute('aria-label', t('الإعدادات'));
+// الدردشة الصوتية: زر مايكي، ودوسة على كارت لاعب تكتمه
+$('#chatBtn').addEventListener('click', () => game && game.toggleChat());
+$('#cards').addEventListener('click', (e) => {
+  const card = e.target.closest && e.target.closest('.pcard');
+  if (card && game) game.toggleMutePlayer(card.dataset.uid);
+});
 $('#goText').textContent = t('يلا!');
 
 /* ------------------------------------------------------------ القائمة */
@@ -130,7 +137,8 @@ function showMenu() {
   demoStage();
   const name = (profile && profile.user && profile.user.name) || localName();
   const photo = profile && profile.user && profile.user.photo;
-  const chip = meta.chip({ name, photo });
+  roomsPanel = null;
+  const chip = meta.chip({ name, photo }, { onClose: showMenu });
   const p = meta.profile;
   const side = el(
     'div',
@@ -143,6 +151,8 @@ function showMenu() {
       el('span', {}, '🎁'),
       el('small', {}, t('مجاني')),
     ),
+    // صوتك باللعبة: البوت يستلمه والأدمن يوافق
+    el('button', { class: 'side-btn addsnd', onclick: addSound }, el('span', {}, '🎙️'), el('small', {}, t('ضيف صوت'))),
   );
   const menu = el(
     'div',
@@ -153,7 +163,7 @@ function showMenu() {
     el(
       'div',
       { class: 'menu-btns' },
-      el('button', { class: 'btn pink big quick', onclick: () => quickMatch() }, t('🎲 لعب عشوائي')),
+      el('button', { class: 'btn pink big quick', onclick: () => showPublicRooms() }, t('🎲 لعب عشوائي')),
       el('button', { class: 'btn purple friends', onclick: () => createRoom(false) }, t('🎤 العب ويا ربعك')),
       el('button', { class: 'btn blue', onclick: joinByCode }, t('🔢 ادخل بكود')),
       el('button', { class: 'btn green', onclick: () => createRoom(true) }, t('🎯 تحدّي فردي')),
@@ -169,6 +179,169 @@ function showMenu() {
     el('div', { class: 'version' }, `v${VERSION}${insideTelegram ? '' : ' · ' + t('ضيف')}`),
   );
   ui.overlay(menu, 'menu-layer');
+}
+
+/** «ضيف صوت»: يفتح البوت على خطوة إرسال الصوت (فيديو أو فويس، أقل من 15 ثانية) */
+function addSound() {
+  haptic('light');
+  if (!insideTelegram || !config.bot) {
+    ui.toast(t('افتح اللعبة من تيليجرام حتى تضيف صوتك'), 3000);
+    return;
+  }
+  ui.toast(t('🎙️ دز الصوت للبوت — إذا انقبل تاخذ 50 🎤 و50 خبرة'), 3000);
+  openTgLink(`https://t.me/${config.bot}?start=addsound`);
+}
+
+/* ------------------------------------------------------------ الغرف العامة */
+
+/** إذا اللعبة العامة بتبدي لوحدها: نطلب المايك بنفس اللمسة حتى يكون جاهز */
+function warmMic() {
+  if (audio.micState === 'on') return;
+  audio
+    .openMic()
+    .then((ok) => {
+      if (ok && audio.releaseAfterRecord) audio.closeMic();
+    })
+    .catch(() => null);
+}
+
+/** «🎲 لعب عشوائي»: الغرف العامة الموجودة (تختار وحدة)، أو تسوّي غرفة عامة، أو دخول سريع */
+function showPublicRooms() {
+  haptic('light');
+  audio.unlock();
+  const list = el('div', { class: 'rooms-list' }, el('div', { class: 'rooms-empty' }, t('جاري التحميل…')));
+  let timer = null;
+  const close = () => {
+    clearInterval(timer);
+    roomsPanel = null;
+    showMenu();
+  };
+  const panel = el(
+    'div',
+    { class: 'panel rooms' },
+    el('button', { class: 'xbtn', 'aria-label': t('سكّر'), onclick: close }, '✕'),
+    el('div', { class: 'panel-title' }, t('🎲 الغرف العامة')),
+    el(
+      'div',
+      { class: 'rooms-actions' },
+      el('button', { class: 'btn pink', onclick: () => createPublic() }, t('➕ إنشاء غرفة عامة')),
+      el(
+        'button',
+        {
+          class: 'btn blue',
+          onclick: () => {
+            clearInterval(timer);
+            roomsPanel = null;
+            quickMatch();
+          },
+        },
+        t('⚡ دخول سريع'),
+      ),
+    ),
+    list,
+    el('div', { class: 'rooms-note' }, t('🔒 غرف «العب ويا ربعك» خاصة: ما تبين هنا وتنفتح بالكود بس')),
+  );
+  roomsPanel = panel;
+  ui.overlay(panel, 'panel-layer');
+  const load = async () => {
+    if (!panel.isConnected || roomsPanel !== panel) return clearInterval(timer);
+    try {
+      const { rooms, max } = await api('/api/rooms/public');
+      if (panel.isConnected) renderRooms(list, rooms || [], max || MAX_PLAYERS);
+    } catch (e) {
+      if (!list.querySelector('.room-row')) {
+        list.innerHTML = '';
+        list.appendChild(el('div', { class: 'rooms-empty' }, t(e.message || 'خطأ بالاتصال')));
+      }
+    }
+  };
+  load();
+  timer = setInterval(load, 3000);
+}
+
+const FACE_COLORS = ['#ff4f8b', '#7c5cff', '#2fb5ff', '#22c55e', '#ff9f1c'];
+
+function renderRooms(list, rooms, max) {
+  list.innerHTML = '';
+  if (!rooms.length) {
+    list.appendChild(
+      el('div', { class: 'rooms-empty' }, el('div', {}, el('b', {}, '🏜️'), t('ماكو غرف عامة هسه'), el('br'), t('سوّي وحدة والناس تدخل عليك!'))),
+    );
+    return;
+  }
+  const now = Date.now();
+  for (const r of rooms) {
+    const open = (r.phase === 'lobby' || r.phase === 'final') && r.n < max;
+    const players = r.players && r.players.length ? r.players : [{ n: r.host || '؟' }];
+    const faces = [];
+    for (let i = 0; i < max; i++) {
+      const pl = players[i];
+      faces.push(
+        pl
+          ? el('span', { style: { '--c': FACE_COLORS[i % FACE_COLORS.length] } }, String(pl.n || '؟').trim().slice(0, 1).toUpperCase() || '؟')
+          : el('span', { class: 'empty' }),
+      );
+    }
+    let status;
+    if (r.phase === 'lobby' && r.startsAt && r.startsAt > now) status = t('⏳ تبدي بعد {s} ثانية', { s: Math.ceil((r.startsAt - now) / 1000) });
+    else if (r.phase === 'lobby') status = t('تنتظر لاعبين');
+    else if (r.phase === 'final') status = t('🏁 خلصت — اللعبة الجاية قريب');
+    else status = t('🎮 بنص لعبة');
+    list.appendChild(
+      el(
+        'div',
+        { class: 'room-row' + (open ? '' : ' busy') },
+        el('div', { class: 'rr-faces' }, faces),
+        el(
+          'div',
+          { class: 'rr-info' },
+          el('b', {}, t('👑 غرفة {name}', { name: r.host || players[0].n || '؟' })),
+          el('small', {}, status, ' · ', el('span', { class: 'rr-code' }, '#' + r.code)),
+        ),
+        el('div', { class: 'rr-n' }, `👥 ${r.n}/${max}`),
+        open
+          ? el('button', { class: 'btn green', onclick: () => joinPublic(r.code) }, t('ادخل'))
+          : el('button', { class: 'btn ghost', disabled: true }, r.n >= max ? t('مليانة') : t('بنص لعبة')),
+      ),
+    );
+  }
+}
+
+function enterPublic(code) {
+  roomsPanel = null;
+  enterRoom(code, false, {
+    pub: true,
+    // امتلت أو بدت قبل ما نوصل: نرجع للقائمة
+    onRetry: () => {
+      ui.toast(t('الغرفة امتلت أو بدت — اختار غيرها'), 2500);
+      if (game) game.leave(true);
+      showPublicRooms();
+    },
+  });
+}
+
+async function joinPublic(code) {
+  if (busy) return;
+  haptic('medium');
+  await audio.unlock();
+  warmMic();
+  enterPublic(code);
+}
+
+async function createPublic() {
+  if (busy) return;
+  busy = true;
+  haptic('medium');
+  await audio.unlock();
+  warmMic();
+  try {
+    const { code } = await api('/api/rooms', { ...authBody(), pub: true });
+    enterPublic(code);
+  } catch (e) {
+    ui.toast(t(e.message || 'صار خطأ'));
+  } finally {
+    busy = false;
+  }
 }
 
 async function createRoom(solo) {
@@ -196,14 +369,7 @@ async function quickMatch({ exclude = [], bad = '', tries = 0 } = {}) {
   haptic('medium');
   await audio.unlock();
   // نطلب المايك بنفس اللمسة: الغرفة العامة تبدي لوحدها، فخلي يكون جاهز
-  if (tries === 0 && audio.micState !== 'on') {
-    audio
-      .openMic()
-      .then((ok) => {
-        if (ok && audio.releaseAfterRecord) audio.closeMic();
-      })
-      .catch(() => null);
-  }
+  if (tries === 0) warmMic();
   if (!game) ui.toast(t('🔎 ندوّر غرفة…'), 1500);
   try {
     const { code } = await api('/api/quick', { ...authBody(), exclude, bad });
@@ -300,12 +466,12 @@ function enterRoom(code, solo, { pub = false, onRetry = null } = {}) {
     meta,
     pub,
     onRetry,
-    // «🎲 غرفة ثانية» من نهاية لعبة عامة
-    onQuick: (from) => quickMatch({ exclude: from ? [from] : [] }),
+    // «🎲 غرفة ثانية» من نهاية لعبة عامة: قائمة الغرف العامة
+    onQuick: () => showPublicRooms(),
     onExit: (silent) => {
       game = null;
       refreshProfile().then(() => {
-        if (document.documentElement.dataset.screen === 'menu' && !meta.panel) showMenu();
+        if (document.documentElement.dataset.screen === 'menu' && !meta.panel && !roomsPanel) showMenu();
       });
       showMenu();
       if (!silent) haptic('light');
@@ -357,10 +523,47 @@ async function boot() {
     );
     return;
   }
+  // وضع الصيانة (من لوحة المطوّر): الأدمن بس يدخل
+  if (config.maintenance && !(profile && profile.user && profile.user.admin)) {
+    showMaintenance();
+    return;
+  }
   const sp = startParam();
   const m = /^r(\d{5})$/.exec(sp || '');
   if (m) enterRoom(m[1], false);
   else showMenu();
+}
+
+function showMaintenance() {
+  document.documentElement.dataset.screen = 'menu';
+  stage.setShot('menu');
+  demoStage();
+  ui.overlay(
+    el(
+      'div',
+      { class: 'panel maint' },
+      el('div', { class: 'big-ic' }, '🛠️'),
+      el('div', { class: 'panel-title' }, t('🛠️ اللعبة بالصيانة هسه — نرجع قريب')),
+      el('div', { class: 'hint center' }, t('نحسّن اللعبة حتى ترجع أحلى — جرّب بعد شوية 💪')),
+      el(
+        'button',
+        {
+          class: 'btn pink',
+          onclick: async () => {
+            haptic('light');
+            const c = await api('/api/config').catch(() => null);
+            if (c && !c.maintenance) {
+              config = c;
+              meta.setConfig(config);
+              showMenu();
+            } else ui.toast(t('بعدها بالصيانة — جرّب بعد شوية'), 2200);
+          },
+        },
+        t('🔄 جرّب مرة ثانية'),
+      ),
+    ),
+    'panel-layer',
+  );
 }
 
 boot();

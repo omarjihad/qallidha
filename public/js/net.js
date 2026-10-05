@@ -107,6 +107,8 @@ export class RoomConnection {
       if (typeof e.data !== 'string') {
         const u8 = new Uint8Array(e.data);
         if (u8[0] === 2) this.h.take && this.h.take({ round: u8[1], seat: u8[2], data: u8.subarray(4) });
+        // دردشة صوتية: [3, مقعد اللي يحچي, ...]
+        else if (u8[0] === 3) this.h.voice && this.h.voice({ seat: u8[1], data: u8.subarray(2) });
         return;
       }
       if (e.data === 'pong') return;

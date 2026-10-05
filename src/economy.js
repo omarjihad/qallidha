@@ -41,6 +41,12 @@ export class Economy {
       'pass_got INTEGER DEFAULT 0',
       'pass_got_p INTEGER DEFAULT 0',
       "lang TEXT DEFAULT ''",
+      'last_seen INTEGER DEFAULT 0',
+      // الترتيب (المتصدرين) منفصل عن اللفل: الأدمن يكدر يصفّره بدون ما تنمسح اللفلات
+      'lb_points INTEGER DEFAULT 0',
+      'lb_wins INTEGER DEFAULT 0',
+      'lb_games INTEGER DEFAULT 0',
+      'lb_best INTEGER DEFAULT 0',
     ];
     for (const c of cols) {
       try {
@@ -69,16 +75,19 @@ export class Economy {
   ensureUser(uid, name = '', photo = '', lang = '') {
     // lang: لغة اللعبة عند اللاعب (حتى البوت يحچي وياه بنفسها)
     const lg = ['ar', 'ru', 'en'].includes(lang) ? lang : '';
+    const now = Date.now();
     this.sql.exec(
-      `INSERT INTO users (id, name, photo, updated, lang) VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO users (id, name, photo, updated, lang, last_seen) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE users.name END,
          photo = CASE WHEN excluded.photo <> '' THEN excluded.photo ELSE users.photo END,
-         lang = CASE WHEN excluded.lang <> '' THEN excluded.lang ELSE users.lang END`,
+         lang = CASE WHEN excluded.lang <> '' THEN excluded.lang ELSE users.lang END,
+         last_seen = excluded.last_seen`,
       uid,
       name || '',
       photo || '',
-      Date.now(),
+      now,
       lg,
+      now,
     );
   }
 
@@ -313,12 +322,19 @@ export class Economy {
       const before = this.row(r.uid);
       const ptsBefore = before ? before.points : 0;
       this.sql.exec(
-        `INSERT INTO users (id, name, photo, games, wins, points, best, updated) VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+        `INSERT INTO users (id, name, photo, games, wins, points, best, updated, lb_games, lb_wins, lb_points, lb_best, last_seen)
+           VALUES (?, ?, ?, 1, ?, ?, ?, ?, 1, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET name = excluded.name, photo = CASE WHEN excluded.photo <> '' THEN excluded.photo ELSE users.photo END,
-           games = games + 1, wins = wins + excluded.wins, points = points + excluded.points, best = MAX(best, excluded.best), updated = excluded.updated`,
+           games = games + 1, wins = wins + excluded.wins, points = points + excluded.points, best = MAX(best, excluded.best), updated = excluded.updated,
+           lb_games = lb_games + 1, lb_wins = lb_wins + excluded.wins, lb_points = lb_points + excluded.points, lb_best = MAX(lb_best, excluded.best),
+           last_seen = excluded.updated`,
         r.uid,
         r.name || '',
         r.photo || '',
+        isWin ? 1 : 0,
+        score,
+        score,
+        now,
         isWin ? 1 : 0,
         score,
         score,
