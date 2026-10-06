@@ -9,6 +9,7 @@ import { LIBRARY_BY_SLUG } from './library-sounds.js';
 import { seasonOf } from '../public/js/catalog.js';
 import { passPrice, passInvoice, packInvoice } from './pass.js';
 import { STAR_PACKS, packPrice } from '../public/js/catalog.js';
+import { adminApi } from './admin.js';
 
 export { Room, Hub };
 
@@ -226,12 +227,12 @@ async function api(request, env, ctx, url) {
   }
 
   if (path === '/api/config') {
-    const bot = token ? await hubOf(env).getKV('bot') : null;
-    const f = await flags(env);
+    const [brief, f] = await Promise.all([hubOf(env).configBrief().catch(() => ({})), flags(env)]);
     return json({
+      contest: brief.contest || null,
       version: VERSION,
       maintenance: f.maint,
-      bot: bot || String(env.BOT_USERNAME || '').replace('@', '') || null,
+      bot: (token && brief.bot) || String(env.BOT_USERNAME || '').replace('@', '') || null,
       appShort: String(env.APP_SHORT_NAME || '').trim() || null,
       guests: String(env.ALLOW_GUEST || 'true') !== 'false',
       ads: adsConfig(env),
@@ -265,7 +266,46 @@ async function api(request, env, ctx, url) {
     const profile = user.guest ? null : await hub.profile(user.uid, user.name, user.photo, lang);
     // أول مرة يفتح اللعبة (وما دخل البوت قبل): إشعار للأدمن
     if (!user.guest && user.tg) ctx.waitUntil(hub.join({ ...user.tg, src: appSource(user) }).catch(() => null));
-    return json({ user: { uid: user.uid, name: user.name, photo: user.photo, guest: user.guest, startParam: user.startParam, admin: isAdminUser(env, user) }, stats, profile });
+    // القائمة (inbox:true): هدايا المطوّر والفوز بالمسابقة (نافذة باللعبة مرة وحدة) + المسابقة الشغّالة لكارت القائمة
+    const extra = body.inbox === true ? await hub.menuExtras(user.guest ? '' : user.uid).catch(() => null) : null;
+    return json({
+      user: { uid: user.uid, name: user.name, photo: user.photo, guest: user.guest, startParam: user.startParam, admin: isAdminUser(env, user) },
+      stats,
+      profile,
+      inbox: (extra && extra.inbox) || [],
+      ...(extra ? { contest: extra.contest } : {}),
+    });
+  }
+
+  // اللاعب سكّر نافذة الهدية/الفوز: تنعلّم «شافها» (قبلها تبقى تطلع)
+  if (path === '/api/inbox/seen' && request.method === 'POST') {
+    const body = await readAuth(request);
+    const user = await identify(env, body);
+    if (user.guest) return json({ ok: true, n: 0 });
+    return json(await hubOf(env).inboxSeen(user.uid, body.ids));
+  }
+
+  // مسابقة المتصدرين: الوقت والجوائز والترتيب وترتيبي
+  if (path === '/api/contest' && request.method === 'POST') {
+    const body = await readAuth(request);
+    let user = null;
+    try {
+      user = await identify(env, body);
+    } catch {
+      user = null;
+    }
+    return json(await hubOf(env).contestView(user && !user.guest ? user.uid : '', 20));
+  }
+
+  // لوحة المطوّر داخل اللعبة: الأدمن بس (initData موقّعة + آيديه بـADMIN_IDS)
+  if (path === '/api/admin' && request.method === 'POST') {
+    const body = await readAuth(request);
+    const user = await identify(env, body);
+    if (!isAdminUser(env, user)) return json({ error: 'forbidden', message: '⛔ هاي اللوحة للمطوّر بس' }, 403);
+    const r = await adminApi({ env, origin, hub: hubOf(env) }, user, body);
+    // الحظر والصيانة يبينون فورًا (بهذا العامل؛ الباقي خلال 20 ثانية)
+    if (!r.error && ['ban', 'unban', 'maint'].includes(String(body.op))) flagsCache.at = 0;
+    return json(r, r.error ? 400 : 200);
   }
 
   // ---------------- المتجر والإعلانات والباس (لاعبين تيليجرام بس)

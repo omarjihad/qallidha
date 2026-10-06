@@ -630,6 +630,12 @@ export class Meta {
         if (it) items.push(el('div', { class: 'rw up' }, el('b', {}, it.icon), el('span', {}, r.dup ? `${t(it.name)} (${plus(r.dup)} ${CUR.icon})` : t(it.name))));
       }
     }
+    // مسابقة المتصدرين: نقاط هاللعبة وترتيبك (أو تنبيه إن اللعب وحدك ما ينحسب)
+    if (reward.contest) {
+      const c = reward.contest;
+      if (c.solo) items.push(el('div', { class: 'rw ct solo' }, el('b', {}, '🔥'), el('span', {}, t('اللعب وحدك ما ينحسب للمسابقة'))));
+      else items.push(el('div', { class: 'rw ct' }, el('b', {}, `🔥 ${plus(c.pts)}`), el('span', {}, c.rank ? t('ترتيبك بالمسابقة #{n}', { n: c.rank }) : t('نقاط المسابقة'))));
+    }
     const can = this.ads.rewarded && this.profile && this.profile.lastGame && this.profile.lastGame.canDouble && this.profile.lastGame.gkey === reward.gkey;
     const strip = el('div', { class: 'rewards' }, el('div', { class: 'rw-title' }, t('🎁 مكافآتك')), el('div', { class: 'rw-items' }, items));
     if (can) {

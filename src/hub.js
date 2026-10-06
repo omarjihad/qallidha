@@ -8,6 +8,12 @@ import { Tg, adminIds } from './telegram.js';
 import { webhookSecret, toHex } from './auth.js';
 import { Economy } from './economy.js';
 import { MAX_PLAYERS } from '../public/js/shared.js';
+import { contestText, contestButtons, winnerText, adminEndText } from './contest.js';
+import { CONTEST_PRIZES, CONTEST_DAYS, CONTEST_MIN_PLAYERS, cleanPrizes } from '../public/js/contest.js';
+import { giftMics, giftLevel, giftItems, giftPremium, giftPassLevels } from './gifts.js';
+import { langFromCode } from '../public/js/lang/detect.js';
+import { tr } from './telegram.js';
+import { levelOf } from '../public/js/catalog.js';
 
 const LIB_MAX_TRIES = 3;
 
@@ -78,6 +84,18 @@ export class Hub extends DurableObject {
       this.setKV('lb_v1', '1');
     }
     this.sql.exec('CREATE INDEX IF NOT EXISTS users_lb ON users(lb_points DESC)');
+    // v1.7: اليوزر ولغة تيليجرام (حتى الأدمن يوصل للفائزين، والإذاعة تنبعث بلغة كل لاعب)
+    addCols('joins', ["username TEXT DEFAULT ''", "lc TEXT DEFAULT ''"]);
+    // مسابقة المتصدرين: نقاط كل لاعب بكل مسابقة (من الألعاب اللي بيها لاعبين اثنين أو أكثر)
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS contest_scores (
+        cid INTEGER, uid TEXT, points INTEGER DEFAULT 0, games INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
+        best INTEGER DEFAULT 0, at INTEGER, PRIMARY KEY (cid, uid))`,
+    );
+    this.sql.exec('CREATE INDEX IF NOT EXISTS contest_rank ON contest_scores(cid, points DESC)');
+    // صندوق اللاعب: هدايا الأدمن والفوز بالمسابقة (تطلعله نافذة باللعبة مرة وحدة)
+    this.sql.exec('CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT, kind TEXT, data TEXT, at INTEGER, seen INTEGER DEFAULT 0, by TEXT)');
+    this.sql.exec('CREATE INDEX IF NOT EXISTS inbox_uid ON inbox(uid, seen)');
   }
 
   /** يصحّي الـHub بعد ms (التنزيل والإذاعة يشتغلون بالخلفية بدفعات) — ما يأخّر منبّه أقرب */
@@ -124,15 +142,21 @@ export class Hub extends DurableObject {
       .toArray();
   }
 
-  /** results: [{uid, name, photo, score, guest}] → مكافآت كل لاعب تيليجرام */
-  recordGame(results, winner, gkey = '') {
+  /** results: [{uid, name, photo, score, guest}] → مكافآت كل لاعب تيليجرام (ووياها نقاط المسابقة إذا شغّالة) */
+  async recordGame(results, winner, gkey = '') {
     const plays = results.filter((r) => !r.guest).length;
     this.sql.exec(
       'INSERT INTO stats_day (day, games, plays) VALUES (?, 1, ?) ON CONFLICT(day) DO UPDATE SET games = games + 1, plays = plays + excluded.plays',
       this.dayKey(),
       plays,
     );
-    return this.eco.recordGame(results, winner, gkey);
+    const out = this.eco.recordGame(results, winner, gkey);
+    try {
+      await this.contestScore(results, winner, out);
+    } catch (e) {
+      console.log('contestScore failed', e && e.message);
+    }
+    return out;
   }
 
   /* ---------------- لوحة المطوّر: الحظر، الصيانة، الترتيب، الإحصائيات */
@@ -224,10 +248,21 @@ export class Hub extends DurableObject {
 
   /* ---------------- الإذاعة: رسالة الأدمن تنسخ لكل اللاعبين بدفعات (حدود تيليجرام وCloudflare) */
 
-  async startBroadcast({ from, msg, by }) {
+  /**
+   * يبدي إذاعة لكل اللاعبين. الأنواع:
+   *  copy (الافتراضي): ينسخ رسالة الأدمن من البوت {from, msg}
+   *  text: نص من لوحة المطوّر باللعبة {text, button}
+   *  contest: إذاعة المسابقة بلغة كل لاعب {tpl: start|remind|winners, cid}
+   */
+  async startBroadcast({ kind = 'copy', from, msg, text, button = true, tpl, cid, origin = '', by }) {
     if (this.getKV('bc_job')) return { error: 'running' };
     const total = this.sql.exec('SELECT COUNT(*) AS c FROM joins WHERE blocked = 0 AND uid NOT IN (SELECT uid FROM banned)').one().c;
-    this.setKV('bc_job', JSON.stringify({ from, msg, by: String(by || ''), cursor: 0, sent: 0, failed: 0, total, started: Date.now() }));
+    const job = { id: crypto.randomUUID(), kind, by: String(by || ''), cursor: 0, sent: 0, failed: 0, total, started: Date.now(), origin: String(origin || '') };
+    if (kind === 'copy') Object.assign(job, { from, msg });
+    else if (kind === 'text') Object.assign(job, { text: String(text || '').slice(0, 4000), button: !!button });
+    else if (kind === 'contest') Object.assign(job, { tpl, cid: Number(cid) });
+    else return { error: 'kind' };
+    this.setKV('bc_job', JSON.stringify(job));
     await this.kick(150);
     return { ok: true, total };
   }
@@ -250,12 +285,45 @@ export class Hub extends DurableObject {
     const tg = new Tg(token, this.env.TG_API_BASE);
     const batch = Math.max(1, Math.min(25, Number(this.env.BC_BATCH) || 20));
     const rows = this.sql
-      .exec('SELECT rowid AS r, uid FROM joins WHERE rowid > ? AND blocked = 0 AND uid NOT IN (SELECT uid FROM banned) ORDER BY rowid LIMIT ?', job.cursor, batch)
+      .exec(
+        `SELECT j.rowid AS r, j.uid, j.lc, COALESCE(u.lang, '') AS lang FROM joins j LEFT JOIN users u ON u.id = j.uid
+         WHERE j.rowid > ? AND j.blocked = 0 AND j.uid NOT IN (SELECT uid FROM banned) ORDER BY j.rowid LIMIT ?`,
+        job.cursor,
+        batch,
+      )
       .toArray();
     let wait = Math.max(300, Number(this.env.BC_GAP_MS) || 1100);
+    // إذاعة المسابقة: نجيب المسابقة والمتصدرين مرة وحدة لكل دفعة
+    const contest = job.kind === 'contest' ? this.contestById(job.cid) : null;
+    if (job.kind === 'contest' && !contest) {
+      this.delKV('bc_job');
+      return 0;
+    }
+    // «بدت» و«تذكير» لمسابقة خلصت أو انلغت بنص الإذاعة: نوقف (حتى ما توصل «تبقى 0:00:00»)
+    if (contest && job.tpl !== 'winners' && (contest.status !== 'running' || contest.end <= Date.now())) {
+      this.delKV('bc_job');
+      await this.bcReport(tg, job, '⏹️ وقفت إذاعة المسابقة — المسابقة خلصت أو انلغت');
+      return 0;
+    }
+    const top = contest && job.tpl === 'remind' ? this.contestTop(contest.id, 3) : [];
+    const now = Date.now();
     for (const r of rows) {
+      const chatId = Number(String(r.uid).slice(1));
+      const lang = r.lang === 'ar' || r.lang === 'ru' || r.lang === 'en' ? r.lang : langFromCode(r.lc);
       try {
-        await tg.call('copyMessage', { chat_id: Number(String(r.uid).slice(1)), from_chat_id: job.from, message_id: job.msg });
+        if (job.kind === 'text') {
+          await tg.call('sendMessage', {
+            chat_id: chatId,
+            text: job.text,
+            ...(job.button && job.origin ? { reply_markup: { inline_keyboard: [[{ text: tr(lang, '🎮 العب هسه'), web_app: { url: job.origin + '/' } }]] } } : {}),
+          });
+        } else if (job.kind === 'contest') {
+          await tg.call('sendMessage', {
+            chat_id: chatId,
+            text: contestText(job.tpl, contest, lang, { top, now }),
+            ...(job.origin ? { reply_markup: contestButtons(job.origin, lang) } : {}),
+          });
+        } else await tg.call('copyMessage', { chat_id: chatId, from_chat_id: job.from, message_id: job.msg });
         job.sent++;
       } catch (e) {
         const m = String((e && e.message) || e);
@@ -273,14 +341,537 @@ export class Hub extends DurableObject {
     if (!rows.length) {
       // خلصت: تقرير للأدمن اللي بداها
       this.sql.exec('DELETE FROM kv WHERE k = ?', 'bc_job');
-      const secs = Math.round((Date.now() - job.started) / 1000);
-      const text = ['‏📢 خلصت الإذاعة', `‏✅ وصلت: ${job.sent}`, `‏❌ ما وصلت: ${job.failed} (حاظرين البوت أو ما بدوا وياه)`, `‏⏱️ ${secs} ثانية`].join('\n');
-      const to = job.by ? [job.by] : adminIds(this.env);
-      for (const id of to) await tg.call('sendMessage', { chat_id: id, text }).catch(() => null);
+      const title = job.kind === 'contest' ? { start: '🔥 خلصت إذاعة بداية المسابقة', remind: '⏰ خلصت إذاعة تذكير المسابقة', winners: '🏁 خلصت إذاعة الفائزين' }[job.tpl] || '📢 خلصت الإذاعة' : '📢 خلصت الإذاعة';
+      await this.bcReport(tg, job, title);
       return 0;
     }
+    // وقت الإرسال ممكن الأدمن وقّفها (أو وقّفها وبدا وحدة جديدة): ما نرجّع النسخة القديمة
+    const cur = JSON.parse(this.getKV('bc_job') || 'null');
+    if (!cur || (cur.id || cur.started) !== (job.id || job.started)) return cur ? 150 : 0;
     this.setKV('bc_job', JSON.stringify(job));
     return wait;
+  }
+
+  /** تقرير الإذاعة للأدمن اللي بداها */
+  async bcReport(tg, job, title) {
+    const secs = Math.round((Date.now() - job.started) / 1000);
+    const text = [`‏${title}`, `‏✅ وصلت: ${job.sent}`, `‏❌ ما وصلت: ${job.failed} (حاظرين البوت أو ما بدوا وياه)`, `‏⏱️ ${secs} ثانية`].join('\n');
+    const to = job.by ? [job.by] : adminIds(this.env);
+    for (const id of to) await tg.call('sendMessage', { chat_id: id, text }).catch(() => null);
+  }
+
+  /** يوقف إذاعة «بدت/تذكير» لهاي المسابقة (من تنلغي أو تنتهي) */
+  stopContestBc(cid) {
+    const job = JSON.parse(this.getKV('bc_job') || 'null');
+    if (job && job.kind === 'contest' && job.cid === Number(cid) && job.tpl !== 'winners') this.delKV('bc_job');
+  }
+
+  /* ---------------- مسابقة المتصدرين (أسبوعية، جوائز نجوم تيليجرام) */
+
+  contestState() {
+    return JSON.parse(this.getKV('contest') || 'null');
+  }
+
+  contestSave(c) {
+    this.setKV('contest', JSON.stringify(c));
+    return c;
+  }
+
+  contestHist() {
+    return JSON.parse(this.getKV('contest_hist') || '[]');
+  }
+
+  /** المسابقة الحالية أو وحدة من السجل */
+  contestById(id) {
+    const c = this.contestState();
+    if (c && c.id === Number(id)) return c;
+    return this.contestHist().find((x) => x.id === Number(id)) || null;
+  }
+
+  /** ترتيب المسابقة: النقاط، والتعادل للي وصلها أول */
+  contestTop(cid, limit = 10) {
+    return this.sql
+      .exec(
+        `SELECT s.uid, s.points, s.games, s.wins, s.best, s.at,
+           COALESCE(NULLIF(u.name, ''), j.name, '') AS name, COALESCE(u.photo, '') AS photo, COALESCE(j.username, '') AS username
+         FROM contest_scores s LEFT JOIN users u ON u.id = s.uid LEFT JOIN joins j ON j.uid = s.uid
+         WHERE s.cid = ? AND s.points > 0 AND s.uid NOT IN (SELECT uid FROM banned)
+         ORDER BY s.points DESC, s.at ASC, s.uid ASC LIMIT ?`,
+        Number(cid),
+        Math.min(50, limit),
+      )
+      .toArray();
+  }
+
+  contestMe(cid, uid) {
+    const r = this.sql.exec('SELECT points, games, wins, at FROM contest_scores WHERE cid = ? AND uid = ?', Number(cid), String(uid)).toArray()[0];
+    if (!r) return { points: 0, games: 0, wins: 0, rank: null };
+    const rank =
+      r.points > 0
+        ? this.sql
+            .exec(
+              'SELECT COUNT(*) AS c FROM contest_scores WHERE cid = ? AND uid NOT IN (SELECT uid FROM banned) AND (points > ? OR (points = ? AND (at < ? OR (at = ? AND uid < ?))))',
+              Number(cid),
+              r.points,
+              r.points,
+              r.at,
+              r.at,
+              String(uid),
+            )
+            .one().c + 1
+        : null;
+    return { points: r.points, games: r.games, wins: r.wins, rank };
+  }
+
+  /** إذا خلص وقتها: تنحسم هسه (الفائزين والإشعارات) */
+  async contestCheck(now = Date.now()) {
+    const c = this.contestState();
+    if (c && c.status === 'running' && now >= c.end) return this.contestFinalize(c, now);
+    return c;
+  }
+
+  async contestFinalize(c, now = Date.now()) {
+    const top = this.contestTop(c.id, 3);
+    c.winners = top.map((r, i) => ({
+      uid: r.uid,
+      name: r.name,
+      username: r.username,
+      photo: r.photo,
+      points: r.points,
+      games: r.games,
+      wins: r.wins,
+      rank: i + 1,
+      prize: (c.prizes || [])[i] || 0,
+      paid: false,
+    }));
+    c.status = 'ended';
+    c.endedAt = now;
+    c.notify = 1;
+    this.contestSave(c);
+    // الفائز يشوف نافذة «فزت!» من يفتح اللعبة
+    for (const w of c.winners) this.inboxAdd(w.uid, 'win', { cid: c.id, rank: w.rank, prize: w.prize, points: w.points });
+    await this.kick(100);
+    return c;
+  }
+
+  /** للمنبّه: تنحسم من يخلص الوقت، وبعدها إشعار الأدمن ورسائل الفائزين */
+  async contestTick() {
+    let c = this.contestState();
+    if (!c) return 0;
+    const now = Date.now();
+    if (c.status === 'running') {
+      if (now < c.end) return c.end - now;
+      c = await this.contestFinalize(c, now);
+    }
+    if (c.status !== 'ended' || !c.notify) return 0;
+    c.notify = 0;
+    this.contestSave(c);
+    const token = (this.env.TELEGRAM_BOT_TOKEN || '').trim();
+    if (!token) return 0;
+    const tg = new Tg(token, this.env.TG_API_BASE);
+    for (const a of adminIds(this.env)) {
+      await tg.call('sendMessage', { chat_id: a, text: adminEndText(c), parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => null);
+    }
+    const origin = String(c.origin || '');
+    for (const w of c.winners || []) {
+      const lang = this.langFor(w.uid);
+      const ok = await tg
+        .call('sendMessage', {
+          chat_id: Number(String(w.uid).slice(1)),
+          text: winnerText(w, lang),
+          ...(origin ? { reply_markup: { inline_keyboard: [[{ text: tr(lang, '🎮 العب هسه'), web_app: { url: origin + '/' } }]] } } : {}),
+        })
+        .then(() => true)
+        .catch(() => false);
+      w.dm = ok;
+    }
+    // نحفظ بس «وصلته الرسالة» على النسخة الحالية (الأدمن ممكن أشّر «انطيته» بالوقت)
+    const dm = new Map((c.winners || []).map((w) => [w.uid, w.dm]));
+    const mark = (x) => {
+      for (const w of (x && x.winners) || []) if (dm.has(w.uid)) w.dm = dm.get(w.uid);
+    };
+    const cur = this.contestState();
+    if (cur && cur.id === c.id) {
+      mark(cur);
+      this.contestSave(cur);
+    } else {
+      const hist = this.contestHist();
+      const h = hist.find((x) => x.id === c.id);
+      if (h) {
+        mark(h);
+        this.setKV('contest_hist', JSON.stringify(hist));
+      }
+    }
+    return 0;
+  }
+
+  /** نقاط المسابقة من لعبة خلصت (بس الألعاب اللي بيها لاعبين تيليجرام اثنين أو أكثر) */
+  async contestScore(results, winner, out) {
+    const now = Date.now();
+    const c = await this.contestCheck(now);
+    if (!c || c.status !== 'running' || now < c.start) return;
+    const players = results.filter((r) => !r.guest && /^t\d+$/.test(String(r.uid || '')));
+    if (players.length < CONTEST_MIN_PLAYERS) {
+      for (const r of players) if (out[r.uid]) out[r.uid].contest = { cid: c.id, solo: true };
+      return;
+    }
+    for (const r of players) {
+      if (this.isBanned(r.uid)) continue;
+      const score = Math.max(0, Math.round(r.score || 0));
+      const win = r.uid === winner ? 1 : 0;
+      this.sql.exec(
+        `INSERT INTO contest_scores (cid, uid, points, games, wins, best, at) VALUES (?, ?, ?, 1, ?, ?, ?)
+         ON CONFLICT(cid, uid) DO UPDATE SET points = points + excluded.points, games = games + 1, wins = wins + excluded.wins,
+           best = MAX(best, excluded.best), at = CASE WHEN excluded.points > 0 THEN excluded.at ELSE contest_scores.at END`,
+        c.id,
+        r.uid,
+        score,
+        win,
+        score,
+        now,
+      );
+      if (out[r.uid]) out[r.uid].contest = { cid: c.id, pts: score, ...this.contestMe(c.id, r.uid) };
+    }
+  }
+
+  /** للاعبين: المسابقة الحالية (أو آخر وحدة خلصت) والترتيب وترتيبي */
+  async contestView(uid = '', limit = 10) {
+    const now = Date.now();
+    let c = await this.contestCheck(now);
+    if (!c || c.status === 'cancelled') {
+      const last = this.contestHist().find((x) => x.status === 'ended');
+      if (!last) return { contest: null, top: [], me: null, now };
+      c = last;
+    }
+    const pub = { id: c.id, status: c.status, start: c.start, end: c.end, prizes: c.prizes, endedAt: c.endedAt || 0, minPlayers: CONTEST_MIN_PLAYERS };
+    const top = this.contestTop(c.id, limit).map((r) => ({ id: r.uid, name: r.name, photo: r.photo, points: r.points, games: r.games, wins: r.wins }));
+    const me = uid && /^t\d+$/.test(uid) ? this.contestMe(c.id, uid) : null;
+    const winners = c.status === 'ended' ? (c.winners || []).map((w) => ({ id: w.uid, name: w.name, photo: w.photo, points: w.points, rank: w.rank, prize: w.prize })) : [];
+    return { contest: pub, top, me, winners, now };
+  }
+
+  /** /api/config: اسم البوت + مختصر المسابقة (طلب واحد للكائن) */
+  async configBrief() {
+    return { bot: this.getKV('bot'), contest: await this.contestBrief().catch(() => null) };
+  }
+
+  /** /api/me ويا inbox: صندوق اللاعب (هدايا وفوز) + المسابقة الشغّالة لكارت القائمة (طلب واحد) */
+  async menuExtras(uid = '') {
+    return { inbox: /^t\d+$/.test(String(uid)) ? this.inboxPeek(uid) : [], contest: await this.contestBrief().catch(() => null) };
+  }
+
+  /** للقائمة: مختصر المسابقة الشغّالة */
+  async contestBrief() {
+    const now = Date.now();
+    const c = await this.contestCheck(now);
+    if (!c || c.status !== 'running') return null;
+    return { id: c.id, end: c.end, prizes: c.prizes, now };
+  }
+
+  /* ---- لوحة المطوّر: نشر وإدارة المسابقة */
+
+  contestArchive(c) {
+    if (!c) return;
+    const hist = this.contestHist().filter((x) => x.id !== c.id);
+    hist.unshift({ ...c, notify: 0 });
+    this.setKV('contest_hist', JSON.stringify(hist.slice(0, 12)));
+  }
+
+  /**
+   * «📢 نشر المسابقة»: إذا ماكو مسابقة شغّالة تبدي وحدة جديدة (أسبوع) وتنذاع «بدأت»،
+   * وإذا شغّالة تنذاع رسالة تذكير بالوقت المتبقي والمتصدرين هسه. silent = تبدي بدون إذاعة.
+   */
+  async contestPublish({ origin = '', by = '', days = CONTEST_DAYS, prizes = CONTEST_PRIZES, silent = false, expect = '', cid = 0 } = {}) {
+    if (!silent && this.getKV('bc_job')) return { error: 'bc_running' };
+    const now = Date.now();
+    let c = await this.contestCheck(now);
+    // اللوحة كانت قديمة؟ (زر «تذكير» والمسابقة خلصت، أو زر «ابدي» وأكو وحدة شغّالة) — ما نسوي شي غير اللي قصده الأدمن
+    const live = c && c.status === 'running';
+    if (expect === 'remind' && (!live || (cid && c.id !== Number(cid)))) return { error: 'stale', message: 'المسابقة خلصت أو تغيّرت — حدّث اللوحة' };
+    if (expect === 'start' && live) return { error: 'stale', message: 'أكو مسابقة شغّالة هسه — حدّث اللوحة' };
+    // خلصت هسه وبعد ما وصلت رسائل الفائزين: نكمّلها قبل لا تنأرشف
+    if (c && c.status === 'ended' && c.notify) {
+      await this.contestTick();
+      c = this.contestState();
+    }
+    let tpl = 'remind';
+    if (!c || c.status !== 'running') {
+      if (c) this.contestArchive(c);
+      const id = Number(this.getKV('contest_seq') || '0') + 1;
+      this.setKV('contest_seq', String(id));
+      const d = Math.max(1 / 24, Math.min(60, Number(days) || CONTEST_DAYS));
+      c = { id, status: 'running', start: now, end: now + Math.round(d * 86400000), prizes: cleanPrizes(prizes), pubs: 0, lastPub: 0, by: String(by || ''), origin: String(origin || '') };
+      tpl = 'start';
+    }
+    if (origin) c.origin = String(origin);
+    if (!silent) {
+      c.pubs = (c.pubs || 0) + 1;
+      c.lastPub = now;
+    }
+    this.contestSave(c);
+    await this.kick(Math.max(100, Math.min(c.end - now, 7 * 86400000)));
+    if (silent) return { ok: true, tpl, contest: c, total: 0 };
+    const r = await this.startBroadcast({ kind: 'contest', tpl, cid: c.id, origin, by });
+    if (r.error) return { error: r.error, contest: c };
+    return { ok: true, tpl, contest: c, total: r.total };
+  }
+
+  /** إعلان الفائزين لكل اللاعبين (آخر مسابقة خلصت) */
+  async contestAnnounce({ origin = '', by = '' } = {}) {
+    await this.contestCheck();
+    const c = this.contestState();
+    const target = c && c.status === 'ended' ? c : this.contestHist().find((x) => x.status === 'ended');
+    if (!target) return { error: 'ماكو مسابقة خلصت حتى تعلن فائزيها' };
+    const r = await this.startBroadcast({ kind: 'contest', tpl: 'winners', cid: target.id, origin, by });
+    if (r.error) return { error: r.error === 'running' ? 'bc_running' : r.error };
+    target.announced = Date.now();
+    if (c && c.id === target.id) this.contestSave(target);
+    else this.setKV('contest_hist', JSON.stringify(this.contestHist().map((x) => (x.id === target.id ? target : x))));
+    return { ok: true, total: r.total };
+  }
+
+  /** ينهي المسابقة هسه (الفائزين حسب الترتيب الحالي) */
+  async contestEndNow() {
+    const c = this.contestState();
+    if (!c || c.status !== 'running') return { error: 'ماكو مسابقة شغّالة' };
+    c.end = Date.now();
+    this.stopContestBc(c.id);
+    return { ok: true, contest: await this.contestFinalize(c) };
+  }
+
+  /** يلغي المسابقة بدون فائزين */
+  contestCancel() {
+    const c = this.contestState();
+    if (!c || c.status !== 'running') return { error: 'ماكو مسابقة شغّالة' };
+    c.status = 'cancelled';
+    c.endedAt = Date.now();
+    this.contestSave(c);
+    this.stopContestBc(c.id);
+    return { ok: true, contest: c };
+  }
+
+  /** تغيير الجوائز أو تمديد/تقصير الوقت وهي شغّالة */
+  async contestEdit({ prizes = null, end = null } = {}) {
+    const c = this.contestState();
+    if (!c || c.status !== 'running') return { error: 'ماكو مسابقة شغّالة' };
+    if (prizes) c.prizes = cleanPrizes(prizes);
+    if (end) {
+      const e = Number(end);
+      if (!(e > Date.now() + 60000)) return { error: 'وقت النهاية لازم يكون بعد دقيقة على الأقل' };
+      c.end = Math.min(e, Date.now() + 60 * 86400000);
+    }
+    this.contestSave(c);
+    // قصّرها؟ المنبّه يصحى على النهاية الجديدة (يحسم ويبلّغ الفائزين بوقتها)
+    await this.kick(Math.max(100, c.end - Date.now()));
+    return { ok: true, contest: c };
+  }
+
+  /** «✅ انطيته» — الأدمن دفع جائزة الفائز */
+  contestPaid(cid, uid, paid = true) {
+    const mark = (c) => {
+      const w = (c.winners || []).find((x) => x.uid === String(uid));
+      if (!w) return false;
+      w.paid = !!paid;
+      w.paidAt = paid ? Date.now() : 0;
+      return true;
+    };
+    const c = this.contestState();
+    if (c && c.id === Number(cid)) {
+      if (!mark(c)) return { error: 'هذا مو من الفائزين' };
+      this.contestSave(c);
+      return { ok: true };
+    }
+    const hist = this.contestHist();
+    const h = hist.find((x) => x.id === Number(cid));
+    if (!h || !mark(h)) return { error: 'ما لگيت المسابقة' };
+    this.setKV('contest_hist', JSON.stringify(hist));
+    return { ok: true };
+  }
+
+  /** معاينة الرسالة اللي راح تنذاع (عربي) */
+  async contestPreview({ days = CONTEST_DAYS, prizes = CONTEST_PRIZES } = {}) {
+    const now = Date.now();
+    const c = await this.contestCheck(now);
+    if (c && c.status === 'running') return { tpl: 'remind', text: contestText('remind', c, 'ar', { top: this.contestTop(c.id, 3), now }) };
+    const d = Math.max(1 / 24, Math.min(60, Number(days) || CONTEST_DAYS));
+    return { tpl: 'start', text: contestText('start', { end: now + Math.round(d * 86400000), prizes: cleanPrizes(prizes) }, 'ar', { now }) };
+  }
+
+  /** كل اللي تحتاجه لوحة المطوّر عن المسابقة */
+  async contestAdmin() {
+    const now = Date.now();
+    const c = await this.contestCheck(now);
+    const hist = this.contestHist();
+    const last = c && c.status === 'ended' ? c : hist.find((x) => x.status === 'ended') || null;
+    return {
+      now,
+      preview: await this.contestPreview(),
+      winnersPreview: last ? contestText('winners', last, 'ar', { now }) : '',
+      contest: c,
+      top: c ? this.contestTop(c.id, 10) : [],
+      players: c ? this.sql.exec('SELECT COUNT(*) AS n, COALESCE(SUM(games), 0) AS g FROM contest_scores WHERE cid = ?', c.id).one() : { n: 0, g: 0 },
+      hist: hist.slice(0, 6).map((h) => ({ id: h.id, status: h.status, start: h.start, end: h.end, endedAt: h.endedAt, prizes: h.prizes, winners: h.winners || [], announced: h.announced || 0 })),
+      reach: this.sql.exec('SELECT COUNT(*) AS c FROM joins WHERE blocked = 0 AND uid NOT IN (SELECT uid FROM banned)').one().c,
+      bc: JSON.parse(this.getKV('bc_job') || 'null'),
+      defaults: { prizes: CONTEST_PRIZES, days: CONTEST_DAYS, minPlayers: CONTEST_MIN_PLAYERS },
+    };
+  }
+
+  /* ---------------- صندوق اللاعب (هدايا وفوز) */
+
+  inboxAdd(uid, kind, data = {}, by = '') {
+    this.sql.exec('INSERT INTO inbox (uid, kind, data, at, seen, by) VALUES (?, ?, ?, ?, 0, ?)', String(uid), kind, JSON.stringify(data), Date.now(), String(by || ''));
+  }
+
+  /** اللي ما شافه اللاعب بعد (ينعلّم «شافه» بس من يسكّر النافذة — inboxSeen) */
+  inboxPeek(uid) {
+    return this.sql
+      .exec('SELECT id, kind, data, at FROM inbox WHERE uid = ? AND seen = 0 ORDER BY id LIMIT 10', String(uid))
+      .toArray()
+      .map((r) => ({ id: r.id, kind: r.kind, at: r.at, ...JSON.parse(r.data || '{}') }));
+  }
+
+  /** اللاعب سكّر النافذة: تنعلّم «شافها» (بس مال نفسه) */
+  inboxSeen(uid, ids = []) {
+    const list = [...new Set((Array.isArray(ids) ? ids : [ids]).map(Number).filter((x) => Number.isInteger(x) && x > 0))].slice(0, 20);
+    if (!list.length) return { ok: true, n: 0 };
+    const where = `uid = ? AND seen = 0 AND id IN (${list.map(() => '?').join(',')})`;
+    const n = this.sql.exec(`SELECT COUNT(*) AS c FROM inbox WHERE ${where}`, String(uid), ...list).one().c;
+    if (n) this.sql.exec(`UPDATE inbox SET seen = 1 WHERE ${where}`, String(uid), ...list);
+    return { ok: true, n };
+  }
+
+  /** لغة اللاعب للبوت: اللي اختارها باللعبة، وإلا لغة تيليجرام */
+  langFor(uid) {
+    const u = this.sql.exec('SELECT lang FROM users WHERE id = ?', String(uid)).toArray()[0];
+    if (u && (u.lang === 'ar' || u.lang === 'ru' || u.lang === 'en')) return u.lang;
+    const j = this.sql.exec('SELECT lc FROM joins WHERE uid = ?', String(uid)).toArray()[0];
+    return langFromCode((j && j.lc) || '');
+  }
+
+  /* ---------------- لوحة المطوّر باللعبة: اللاعبين والهدايا والمدفوعات */
+
+  /** بحث عن لاعب: آيدي، @يوزر، أو جزء من الاسم */
+  adminFind(q) {
+    q = String(q || '').trim().slice(0, 40);
+    const base = `SELECT j.uid, COALESCE(NULLIF(u.name, ''), j.name, '') AS name, COALESCE(j.username, '') AS username, COALESCE(u.photo, '') AS photo,
+        COALESCE(u.points, 0) AS points, COALESCE(u.mics, 0) AS mics, COALESCE(u.games, 0) AS games, COALESCE(u.last_seen, j.at) AS seen,
+        (SELECT 1 FROM banned b WHERE b.uid = j.uid) AS banned
+      FROM joins j LEFT JOIN users u ON u.id = j.uid`;
+    let rows;
+    // LIKE: نهرّب % و _ (اليوزرات بيها _ هواية)
+    const like = (x) => String(x).replace(/[\\%_]/g, (c) => '\\' + c);
+    const id = /^\d{3,15}$/.exec(q.replace(/^t/, ''));
+    if (id) rows = this.sql.exec(`${base} WHERE j.uid = ? OR j.uid LIKE ? ESCAPE '\\' ORDER BY seen DESC LIMIT 20`, 't' + id[0], 't' + like(id[0]) + '%').toArray();
+    else if (q.startsWith('@')) rows = this.sql.exec(`${base} WHERE j.username LIKE ? ESCAPE '\\' ORDER BY seen DESC LIMIT 20`, like(q.slice(1)) + '%').toArray();
+    else if (q) rows = this.sql.exec(`${base} WHERE u.name LIKE ? ESCAPE '\\' OR j.name LIKE ? ESCAPE '\\' ORDER BY seen DESC LIMIT 20`, '%' + like(q) + '%', '%' + like(q) + '%').toArray();
+    else rows = this.sql.exec(`${base} ORDER BY seen DESC LIMIT 20`).toArray();
+    return rows.map((r) => ({ ...r, level: levelOf(r.points), banned: !!r.banned }));
+  }
+
+  /** كارت لاعب كامل للوحة */
+  adminUser(uid) {
+    uid = String(uid);
+    const j = this.sql.exec('SELECT * FROM joins WHERE uid = ?', uid).toArray()[0] || null;
+    const u = this.eco.row(uid);
+    if (!j && !u) return null;
+    const prof = u ? this.eco.profile(uid) : null;
+    const c = this.contestState();
+    const owned = u ? [...this.eco.owned(uid).entries()].filter(([, until]) => !until).map(([id]) => id) : [];
+    const ban = this.sql.exec('SELECT at, reason FROM banned WHERE uid = ?', uid).toArray()[0] || null;
+    return {
+      uid,
+      id: uid.slice(1),
+      name: (u && u.name) || (j && j.name) || '',
+      username: (j && j.username) || '',
+      photo: (u && u.photo) || '',
+      lang: this.langFor(uid),
+      joined: j ? j.at : 0,
+      src: j ? j.src : '',
+      blocked: !!(j && j.blocked),
+      seen: (u && u.last_seen) || 0,
+      level: prof ? prof.level.level : 1,
+      points: u ? u.points : 0,
+      mics: u ? u.mics : 0,
+      games: u ? u.games : 0,
+      wins: u ? u.wins : 0,
+      lb: this.me(uid),
+      pass: prof ? prof.pass : null,
+      contest: c ? { id: c.id, status: c.status, ...this.contestMe(c.id, uid) } : null,
+      owned,
+      stars: this.sql.exec('SELECT COALESCE(SUM(stars), 0) AS s FROM payments WHERE uid = ? AND refunded = 0', uid).one().s,
+      banned: ban,
+      admin: adminIds(this.env).includes(uid.slice(1)),
+    };
+  }
+
+  /** هدية من الأدمن: kind = mics | level | items | pass | passlv */
+  gift(uid, kind, args = {}, by = '') {
+    uid = String(uid);
+    if (!/^t\d+$/.test(uid)) return { error: 'آيدي غلط' };
+    if (!this.sql.exec('SELECT 1 FROM joins WHERE uid = ? UNION SELECT 1 FROM users WHERE id = ?', uid, uid).toArray()[0]) return { error: 'هذا اللاعب ما دخل اللعبة ولا البوت' };
+    this.eco.ensureUser(uid, this.nameOf(uid));
+    let res;
+    switch (kind) {
+      case 'mics':
+        res = giftMics(this.eco, uid, args.n);
+        break;
+      case 'level':
+        res = giftLevel(this.eco, uid, args.to);
+        break;
+      case 'items':
+        res = giftItems(this.eco, uid, args.items);
+        break;
+      case 'pass':
+        res = giftPremium(this.eco, uid);
+        break;
+      case 'passlv':
+        res = giftPassLevels(this.eco, uid, args.n);
+        break;
+      default:
+        return { error: 'نوع هدية غلط' };
+    }
+    if (res.error) return res;
+    this.inboxAdd(uid, 'gift', { gift: kind, ...res }, by);
+    return { ok: true, kind, res, user: this.adminUser(uid) };
+  }
+
+  /** آخر الهدايا (للوحة) */
+  adminGifts(limit = 20) {
+    return this.sql
+      .exec(
+        `SELECT i.id, i.uid, i.data, i.at, i.seen, COALESCE(NULLIF(u.name, ''), j.name, '') AS name FROM inbox i
+         LEFT JOIN users u ON u.id = i.uid LEFT JOIN joins j ON j.uid = i.uid WHERE i.kind = 'gift' ORDER BY i.id DESC LIMIT ?`,
+        limit,
+      )
+      .toArray()
+      .map((r) => ({ id: r.id, uid: r.uid, name: r.name, at: r.at, seen: !!r.seen, ...JSON.parse(r.data || '{}') }));
+  }
+
+  /** آخر المدفوعات بالنجوم */
+  adminPayments(limit = 30) {
+    return this.sql
+      .exec(
+        `SELECT p.charge, p.uid, p.stars, p.at, p.refunded, p.sku, p.qty, p.season, COALESCE(NULLIF(u.name, ''), j.name, '') AS name, COALESCE(j.username, '') AS username
+         FROM payments p LEFT JOIN users u ON u.id = p.uid LEFT JOIN joins j ON j.uid = p.uid ORDER BY p.at DESC LIMIT ?`,
+        limit,
+      )
+      .toArray();
+  }
+
+  /** أصوات مقترحة للوحة (ويا رابط الملف حتى الأدمن يسمعه) */
+  adminSubs(limit = 20) {
+    return this.pendingSubs(limit).map((s) => ({ ...s, url: '/tgfile/' + s.file_id }));
+  }
+
+  /** كل الأصوات للوحة ويا روابط تسمعها */
+  adminSounds() {
+    const files = new Map(this.sql.exec('SELECT id, file_id FROM sounds').toArray().map((r) => [r.id, r.file_id]));
+    const builtin = new Map(BUILTIN_SOUNDS.map((b) => [b.id, b.url]));
+    return this.listAll().map((x) => ({
+      ...x,
+      url: x.key.startsWith('c:') ? '/tgfile/' + files.get(Number(x.key.slice(2))) : x.key.startsWith('m:') ? '/lib/' + x.key.slice(2) + '.mp3' : builtin.get(x.key) || '',
+    }));
   }
 
   /* ---------------- أصوات يقترحها اللاعبين (البوت يستلمها والأدمن يقبل أو يرفض) */
@@ -366,10 +957,33 @@ export class Hub extends DurableObject {
     const uid = 't' + Number(u.id);
     const now = Date.now();
     const name = [u.first_name, u.last_name].filter(Boolean).join(' ').trim().slice(0, 64);
-    const r = this.sql.exec('INSERT OR IGNORE INTO joins (uid, at, src, name) VALUES (?, ?, ?, ?)', uid, now, String(u.src || '').slice(0, 80), name);
+    const username = String(u.username || '').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40);
+    const lc = String(u.language_code || '').slice(0, 12);
+    const r = this.sql.exec(
+      'INSERT OR IGNORE INTO joins (uid, at, src, name, username, lc) VALUES (?, ?, ?, ?, ?, ?)',
+      uid,
+      now,
+      String(u.src || '').slice(0, 80),
+      name,
+      username,
+      lc,
+    );
     if (!r.rowsWritten) {
       // رجع يحچي ويا البوت: توصله الإذاعة مرة ثانية
       if (u.fromBot) this.sql.exec('UPDATE joins SET blocked = 0 WHERE uid = ? AND blocked = 1', uid);
+      // اليوزر واللغة يتحدّثون (حتى الأدمن يوصل للفائز، والإذاعة بلغته)
+      this.sql.exec(
+        "UPDATE joins SET username = ?, lc = CASE WHEN ? <> '' THEN ? ELSE lc END, name = CASE WHEN ? <> '' THEN ? ELSE name END WHERE uid = ? AND (username <> ? OR lc <> ? OR name <> ?)",
+        username,
+        lc,
+        lc,
+        name,
+        name,
+        uid,
+        username,
+        lc,
+        name,
+      );
       return { isNew: false };
     }
     const n = this.sql.exec('SELECT COUNT(*) AS c FROM joins').one().c;
@@ -810,10 +1424,10 @@ export class Hub extends DurableObject {
     return this.ensureLibrary({ notify: true });
   }
 
-  /** المنبّه الواحد يشغّل الشغلتين بالخلفية: تنزيل المكتبة والإذاعة، وكل وحدة تكول متى ترجع */
+  /** المنبّه الواحد يشغّل الشغلات بالخلفية: تنزيل المكتبة، الإذاعة، ونهاية المسابقة — وكل وحدة تكول متى ترجع */
   async alarm() {
     const waits = [];
-    for (const step of [() => this.libTick(), () => this.bcTick()]) {
+    for (const step of [() => this.libTick(), () => this.bcTick(), () => this.contestTick()]) {
       try {
         const ms = await step();
         if (ms > 0) waits.push(ms);

@@ -55,6 +55,8 @@ http
       };
       let result = true;
       if (method === 'getMe') result = { id: 777, is_bot: true, first_name: 'قلّدها', username: 'qallidha_test_bot' };
+      // آيديات تنتهي بـ913 حاظرة البوت حتى للرسائل العادية (إذاعة المسابقة والنص تنبعث بـsendMessage)
+      if (method === 'sendMessage' && String(payload.chat_id).endsWith('913')) return fail(403, 'Forbidden: bot was blocked by the user');
       if (method === 'sendMessage') result = { message_id: ++mid, chat: { id: payload.chat_id }, text: payload.text };
       // الإذاعة: آيديات تنتهي بـ13 حاظرة البوت، والآيدي 4290000 يطلع 429 مرة وحدة
       if (method === 'copyMessage') {

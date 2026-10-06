@@ -20,11 +20,15 @@ function unescape(s) {
 }
 
 // 1) t('...') بالواجهة والسيرفر
+// لوحة المطوّر (public/js/admin.js) عربي بس — ما تمر بالترجمة
 const files = [
   ...readdirSync('public/js')
-    .filter((f) => f.endsWith('.js'))
+    .filter((f) => f.endsWith('.js') && f !== 'admin.js')
     .map((f) => 'public/js/' + f),
   'src/telegram.js',
+  // رسائل البوت للاعبين: المسابقة والهدايا
+  'src/contest.js',
+  'src/admin.js',
 ];
 const callRe = /\bt\(\s*(['"`])((?:\\.|(?!\1)[^\\])*?)\1/g;
 for (const f of files) {
@@ -36,6 +40,11 @@ for (const f of files) {
     }
     add(unescape(m[2]), f);
   }
+}
+// tr(lang, '...') بالسيرفر (رسائل البوت بلغة كل لاعب)
+for (const f of readdirSync('src').filter((f) => f.endsWith('.js'))) {
+  const src = readFileSync('src/' + f, 'utf8');
+  for (const m of src.matchAll(/\btr\(\s*[\w.]+\s*,\s*(['"])((?:\\.|(?!\1)[^\\])*?)\1/g)) add(unescape(m[2]), 'src/' + f);
 }
 
 // 2) نصوص بالبيانات تمر بـ t(): الأغراض، الندرة، العجلة، التخريب، تبويبات المتجر، الإعدادات، أخطاء الغرفة، المساعدة

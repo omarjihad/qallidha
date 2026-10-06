@@ -410,6 +410,7 @@ async function route(c, msg, text, cmd, arg) {
       ? [
           '',
           'أوامر الأدمن:',
+          '🛠️ لوحة المطوّر الكاملة داخل اللعبة (زر 🛠️ بالقائمة — تبين إلك بس): المسابقة، الهدايا، الإذاعة، الحظر، الأصوات…',
           '/admin — لوحة المطوّر: إحصائيات، إذاعة، حظر، إعدادات',
           'دز صوت / فويس / فيديو = ينضاف للعبة (الكابشن = اسمه)',
           '/sounds — عدد الأصوات وكل الأصوات بأزرار (تعطيل وحذف)',
@@ -716,6 +717,36 @@ async function markSub(tg, chat, mid, s) {
   await tg.call('editMessageReplyMarkup', { chat_id: chat, message_id: mid, reply_markup: kb([[btn(label, 'noop')]]) }).catch(() => null);
 }
 
+/**
+ * قبول أو رفض صوت مقترح من لوحة المطوّر باللعبة (نفس اللي يصير من أزرار البوت).
+ * deps: {env, hub, origin}. يرجع {ok, sub, soundId, img} أو {error}
+ */
+export async function decideSub(deps, id, accept, reason = '') {
+  const { env, hub, origin } = deps;
+  const tg = new Tg(env.TELEGRAM_BOT_TOKEN, env.TG_API_BASE);
+  const s = await hub.sub(Number(id));
+  if (!s) return { error: 'ما لگيت هذا الصوت' };
+  if (s.status !== 'pending') return { error: s.status === 'approved' ? 'انقبل من قبل' : 'انرفض من قبل' };
+  const to = Number(String(s.uid).slice(1));
+  if (accept) {
+    const img = await userPhoto(tg, s.uid);
+    const r = await hub.approveSub(s.id, img);
+    if (!r.ok) return { error: r.error === 'done' ? 'انحسم من قبل' : 'ما لگيت هذا الصوت' };
+    await tg
+      .call('sendMessage', {
+        chat_id: to,
+        text: subResult(s, true),
+        ...(origin ? { reply_markup: kb([[{ text: tr(s.lang || 'ar', '🎮 العب هسه'), web_app: { url: origin + '/' } }]]) } : {}),
+      })
+      .catch(() => null);
+    return { ok: true, sub: r.sub, soundId: r.soundId, img: !!img };
+  }
+  const r = await hub.rejectSub(s.id, String(reason || '').slice(0, 300));
+  if (!r.ok) return { error: r.error === 'done' ? 'انحسم من قبل' : 'ما لگيت هذا الصوت' };
+  await tg.call('sendMessage', { chat_id: to, text: subResult(r.sub, false, reason) }).catch(() => null);
+  return { ok: true, sub: r.sub };
+}
+
 async function rejectWithReason(c, st, reason) {
   const { hub, tg, send } = c;
   const r = await hub.rejectSub(st.id, reason);
@@ -808,6 +839,8 @@ async function adminHome(c) {
       s.subsPending ? `🎙️ ${s.subsPending} صوت مقترح ينتظرك` : '',
     ),
     reply_markup: kb([
+      // اللوحة الكاملة (المسابقة والهدايا وكلشي) داخل اللعبة — تبين للأدمن بس
+      [{ text: '🛠️ افتح لوحة المطوّر باللعبة', web_app: { url: c.origin + '/?admin=1' } }],
       [btn('📊 الإحصائيات', 'ad|stats'), btn('📢 إذاعة', 'ad|bc')],
       [btn(`🚫 الحظر (${s.banned})`, 'ad|ban'), btn(`🎙️ المقترحة (${s.subsPending})`, 'ad|subs')],
       [btn('🎵 الأصوات', 'ad|snd'), btn('⚙️ إعدادات البوت', 'ad|set')],

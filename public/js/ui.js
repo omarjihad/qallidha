@@ -480,27 +480,3 @@ export function keypad(onSubmit, onClose) {
     pad,
   );
 }
-
-export function leaderboardPanel(rows, meUid, onClose) {
-  const medal = ['🥇', '🥈', '🥉'];
-  const list = rows.length
-    ? rows.map((r, i) =>
-        el(
-          'div',
-          { class: 'lb-row' + (r.id === meUid ? ' me' : '') },
-          el('span', { class: 'lb-rank' }, medal[i] || String(i + 1)),
-          r.photo ? el('img', { class: 'lb-ph', src: r.photo, alt: '' }) : el('span', { class: 'lb-ph ph-empty' }, (r.name || '?').slice(0, 1)),
-          el('span', { class: 'lb-name' }, r.name),
-          el('span', { class: 'lb-pts' }, `${r.points}`),
-          el('span', { class: 'lb-wins' }, `🏆 ${r.wins}`),
-        ),
-      )
-    : [el('div', { class: 'hint center' }, t('بعد ماكو أحد — كون أول واحد! 🎤'))];
-  return el(
-    'div',
-    { class: 'panel board' },
-    el('button', { class: 'xbtn', onclick: onClose }, '✕'),
-    el('div', { class: 'panel-title' }, t('🏆 المتصدرين')),
-    el('div', { class: 'lb-list' }, list),
-  );
-}

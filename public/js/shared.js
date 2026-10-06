@@ -1,7 +1,7 @@
 // ثوابت مشتركة بين السيرفر (Worker/Durable Objects) والواجهة.
 // أي تعديل هنا يوصل للطرفين بنفس النشر.
 
-export const VERSION = '1.6.0';
+export const VERSION = '1.7.0';
 export const GAME_NAME = 'قلّدها';
 
 export const ROUNDS = 4;

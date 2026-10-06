@@ -12,6 +12,7 @@ import { Meta } from './meta.js';
 import { t, applyLang, LANG } from './i18n.js';
 import { settings, onSetting, syncFromCloud } from './settings.js';
 import { openSettings, closeSettings, settingsOpen } from './settingsPanel.js';
+import { menuCard, openBoard, queueInbox, flushInbox, localEnd } from './contestUi.js';
 
 applyLang();
 initTelegram();
@@ -154,11 +155,14 @@ function showMenu() {
     // صوتك باللعبة: البوت يستلمه والأدمن يوافق
     el('button', { class: 'side-btn addsnd', onclick: addSound }, el('span', {}, '🎙️'), el('small', {}, t('ضيف صوت'))),
   );
+  const admin = !!(profile && profile.user && profile.user.admin);
   const menu = el(
     'div',
     { class: 'menu' },
     chip,
     side,
+    // مسابقة المتصدرين الشغّالة: الوقت المتبقي والجوائز
+    menuCard(config.contest, () => showTop('contest')),
     el('div', { class: 'menu-brand' }, el('div', { class: 'logo' }, t(GAME_NAME) + '!'), el('div', { class: 'tagline' }, t('قلّد الأصوات… والذكاء يحكم 🎤'))),
     el(
       'div',
@@ -168,17 +172,44 @@ function showMenu() {
       el('button', { class: 'btn blue', onclick: joinByCode }, t('🔢 ادخل بكود')),
       el('button', { class: 'btn green', onclick: () => createRoom(true) }, t('🎯 تحدّي فردي')),
     ),
-    // أزرار صغيرة بالزاوية: المتصدرين، المساعدة، الإعدادات
+    // أزرار صغيرة بالزاوية: المتصدرين، المساعدة، الإعدادات (ولوحة المطوّر للأدمن بس)
     el(
       'div',
       { class: 'menu-top' },
-      el('button', { class: 'icon-btn top-btn top', 'aria-label': t('🏆 المتصدرين'), onclick: showTop }, '🏆'),
+      el('button', { class: 'icon-btn top-btn top', 'aria-label': t('🏆 المتصدرين'), onclick: () => showTop() }, '🏆'),
       el('button', { class: 'icon-btn top-btn help', 'aria-label': t('شلون تلعب؟'), onclick: showHelp }, '❓'),
       el('button', { class: 'icon-btn top-btn gear', 'aria-label': t('الإعدادات'), onclick: () => openSettings({ stats: statsLine() }) }, '⚙️'),
+      admin ? el('button', { class: 'icon-btn top-btn dev', 'aria-label': 'لوحة المطوّر', onclick: () => openAdminPanel() }, '🛠️') : null,
     ),
     el('div', { class: 'version' }, `v${VERSION}${insideTelegram ? '' : ' · ' + t('ضيف')}`),
   );
   ui.overlay(menu, 'menu-layer');
+  // هدايا المطوّر أو فوز بالمسابقة: نافذة وحدة وحدة
+  flushInbox(meta);
+}
+
+/* ------------------------------------------------------------ لوحة المطوّر (الأدمن بس) */
+
+let adminMod = null;
+async function openAdminPanel(tab = 'dash') {
+  if (!(profile && profile.user && profile.user.admin)) return;
+  haptic('light');
+  try {
+    adminMod = adminMod || (await import('./admin.js'));
+  } catch {
+    ui.toast(t('ماكو اتصال'), 2500);
+    return;
+  }
+  adminMod.openAdmin({
+    meta,
+    tab,
+    onClose: () => {
+      // يمكن هدى نفسه أو بدا مسابقة: نحدّث القائمة
+      refreshProfile().then(() => {
+        if (document.documentElement.dataset.screen === 'menu' && !game && !meta.panel && !roomsPanel && !boardOpen()) showMenu();
+      });
+    },
+  });
 }
 
 /** «ضيف صوت»: يفتح البوت على خطوة إرسال الصوت (فيديو أو فويس، أقل من 15 ثانية) */
@@ -419,16 +450,18 @@ function joinByCode() {
   );
 }
 
-async function showTop() {
+/** المتصدرين: تبويب المسابقة (إذا أكو) + الترتيب العام */
+let boardPanel = null;
+const boardOpen = () => !!(boardPanel && boardPanel.isConnected);
+function showTop(tab = config.contest ? 'contest' : 'all') {
   haptic('light');
-  ui.overlay(el('div', { class: 'panel board' }, el('div', { class: 'panel-title' }, t('🏆 المتصدرين')), el('div', { class: 'hint center' }, t('جاري التحميل…'))), 'panel-layer');
-  try {
-    const { top } = await api('/api/top');
-    ui.overlay(ui.leaderboardPanel(top, profile && profile.user && profile.user.uid, () => showMenu()), 'panel-layer');
-  } catch (e) {
-    ui.toast(t(e.message));
-    showMenu();
-  }
+  const u = profile && profile.user;
+  boardPanel = openBoard({
+    tab,
+    meUid: u && !u.guest ? u.uid : '',
+    onClose: () => showMenu(),
+    onPlay: () => showPublicRooms(),
+  });
 }
 
 function showHelp() {
@@ -471,7 +504,7 @@ function enterRoom(code, solo, { pub = false, onRetry = null } = {}) {
     onExit: (silent) => {
       game = null;
       refreshProfile().then(() => {
-        if (document.documentElement.dataset.screen === 'menu' && !meta.panel && !roomsPanel) showMenu();
+        if (document.documentElement.dataset.screen === 'menu' && !game && !meta.panel && !roomsPanel && !boardOpen()) showMenu();
       });
       showMenu();
       if (!silent) haptic('light');
@@ -493,11 +526,22 @@ function enterRoom(code, solo, { pub = false, onRetry = null } = {}) {
 
 async function refreshProfile() {
   try {
-    profile = await api('/api/me', authBody());
+    // inbox: هدايا المطوّر والفوز بالمسابقة (تطلع نافذة من ترجع القائمة)
+    // وياه المسابقة الشغّالة (كارت القائمة) بنفس الطلب
+    const p = await api('/api/me', { ...authBody(), inbox: true });
+    profile = p;
     if (profile && profile.profile) meta.set(profile.profile);
+    if (profile && 'contest' in profile) setContest(profile.contest);
+    queueInbox(profile && profile.inbox);
   } catch {
     /* */
   }
+}
+
+/** مختصر المسابقة الشغّالة (كارت القائمة) */
+function setContest(brief) {
+  config.contest = brief || null;
+  if (config.contest) config.contest.localEnd = localEnd(config.contest.end, config.contest.now);
 }
 
 /* ------------------------------------------------------------ الإقلاع */
@@ -508,12 +552,15 @@ async function boot() {
     if (langChanged && LANG !== settings.lang && settings.lang) location.reload();
   });
   try {
-    [config, profile] = await Promise.all([api('/api/config').catch(() => ({})), api('/api/me', authBody()).catch((e) => ({ error: e.message }))]);
+    [config, profile] = await Promise.all([api('/api/config').catch(() => ({})), api('/api/me', { ...authBody(), inbox: true }).catch((e) => ({ error: e.message }))]);
   } catch {
     /* */
   }
+  config = config || {};
+  setContest(config.contest);
   meta.setConfig(config);
   if (profile && profile.profile) meta.set(profile.profile);
+  queueInbox(profile && profile.inbox);
   $('#boot').classList.add('hide');
   setTimeout(() => $('#boot').remove(), 600);
   if (profile && profile.error) {
@@ -529,9 +576,15 @@ async function boot() {
     return;
   }
   const sp = startParam();
+  const q = new URLSearchParams(location.search);
   const m = /^r(\d{5})$/.exec(sp || '');
   if (m) enterRoom(m[1], false);
-  else showMenu();
+  else {
+    showMenu();
+    // من أزرار البوت: «🏆 شوف المتصدرين» (?view=contest) و«🛠️ لوحة المطوّر» (?admin=1)
+    if (q.get('admin') === '1' || sp === 'admin') openAdminPanel(q.get('tab') || 'dash');
+    else if (q.get('view') === 'contest' || sp === 'contest') showTop('contest');
+  }
 }
 
 function showMaintenance() {
@@ -554,6 +607,7 @@ function showMaintenance() {
             const c = await api('/api/config').catch(() => null);
             if (c && !c.maintenance) {
               config = c;
+              setContest(config.contest);
               meta.setConfig(config);
               showMenu();
             } else ui.toast(t('بعدها بالصيانة — جرّب بعد شوية'), 2200);

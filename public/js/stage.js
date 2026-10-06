@@ -1350,7 +1350,8 @@ export class Stage {
   loop(now = performance.now()) {
     if (!this.running) return;
     requestAnimationFrame(this.loop);
-    if (document.hidden) return;
+    // لوحة المطوّر مغطية الشاشة كلها: ما نرسم (أخف على الجهاز)
+    if (document.hidden || document.documentElement.classList.contains('adm-open')) return;
     // حد الفريمات: نجمع الوقت ونرسم بس إذا وصل فاصل الفريم
     const gap = this.prevNow ? Math.min(250, now - this.prevNow) : 16;
     this.prevNow = now;
